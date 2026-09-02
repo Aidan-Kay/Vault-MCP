@@ -1,7 +1,9 @@
-"""MCP server: tool surface, auth, transport security, startup.
+"""MCP server: tool surface, REST surface, auth, transport security, startup.
 
-Reads only. Every write stays on obsidian-local-rest-api so Obsidian's own
-cache and link graph remain coherent.
+Two interfaces over one implementation. Lyra speaks MCP; n8n's HTTP Request
+nodes speak plain REST and cannot easily build a JSON-RPC envelope, so /vault/*
+mirrors the shape obsidian-local-rest-api used. Both call src.operations, so the
+resolver and every convention are handled once.
 """
 
 from __future__ import annotations
@@ -18,9 +20,16 @@ from pathlib import Path
 
 import uvicorn
 from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
+from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.responses import PlainTextResponse
+from starlette.routing import Route
 
+from . import operations
 from . import search as search_module
+from . import target as target_mod
 from . import vault
 from .config import settings
 from .embedder import Embedder
@@ -120,10 +129,13 @@ async def lifespan(_server: MCPServer) -> AsyncIterator[None]:
 mcp = MCPServer(
     "vault-index",
     instructions=(
-        "Read-only semantic and keyword search over the Obsidian vault. "
-        "Prefer vault_search to locate information, then vault_read with "
-        "section= to pull only the heading you need. Writes are not available "
-        "here - use the Obsidian write tools."
+        "Semantic and keyword search, reading and writing over the Obsidian "
+        "vault. Prefer vault_search to locate information, then vault_read with "
+        "section= to pull only the heading you need. To edit, call vault_map "
+        "first and patch the '::' path it gives you - a bare heading name works "
+        "whenever it is unique, and the error tells you what to prepend when it "
+        "is not. Writes bump the note's timestamp for you; updating index.md is "
+        "still yours to do."
     ),
     lifespan=lifespan,
 )
@@ -132,6 +144,20 @@ mcp = MCPServer(
 # --------------------------------------------------------------------------
 # Tools
 # --------------------------------------------------------------------------
+
+def _do(fn, *args, **kwargs) -> str:
+    """Run a vault operation, surfacing its error message to the model.
+
+    The MCP runtime masks an arbitrary exception as a bare "Error executing tool
+    <name>" and only lets a ToolError's message through. Every VaultError here is
+    written to be acted on - the ambiguity error lists the exact paths to retry
+    with - so masking it would throw away the entire point of the resolver.
+    """
+    try:
+        return fn(*args, **kwargs)
+    except vault.VaultError as exc:
+        raise ToolError(str(exc)) from exc
+
 
 
 @mcp.tool()
@@ -165,7 +191,7 @@ def vault_read(path: str, section: str | None = None) -> str:
             down to the next heading of equal or shallower depth. Use this
             instead of reading whole notes.
     """
-    return vault.read_note(path, section)
+    return _do(vault.read_note, path, section)
 
 
 @mcp.tool()
@@ -175,7 +201,7 @@ def vault_list(path: str = "") -> str:
     Args:
         path: Vault-relative directory. Defaults to the vault root.
     """
-    entries = vault.list_dir(path)
+    entries = _do(vault.list_dir, path)
     if not entries:
         return f"{path or '/'} is empty."
     lines = [f"{len(entries)} entr(ies) in {path or '/'}:"]
@@ -196,25 +222,209 @@ def vault_map(path: str) -> str:
     Args:
         path: Vault-relative path, e.g. "Pets/Levi.md".
     """
-    parsed = vault.parse_note(path)
+    parsed = _do(vault.parse_note, path)
     lines = [f"# {parsed['path']}", "", "## Frontmatter"]
     if parsed["frontmatter"]:
         for key, value in parsed["frontmatter"].items():
             lines.append(f"- {key}: {json.dumps(value, default=str, ensure_ascii=False)}")
     else:
         lines.append("- (none)")
-    lines += ["", "## Headings"]
-    if parsed["headings"]:
-        for heading in parsed["headings"]:
-            lines.append(f"{'  ' * (heading['depth'] - 1)}- {heading['text']}  (line {heading['line']})")
-    else:
-        lines.append("- (none)")
+    lines += ["", "## Headings", "", "Patch targets. A trailing segment on its own works when it is"]
+    lines += ["unique in this note; prepend ancestors with '::' when it is not.", ""]
+    text = _do(lambda p: vault.read_text(vault.safe_resolve(p)), path)
+    outline = target_mod.outline(text)
+    lines += [f"- {entry}" for entry in outline] or ["- (none)"]
     return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------
+# Write tools
+#
+# Thin wrappers: every one delegates to src.operations, which the REST routes
+# below call too. Nothing here holds logic of its own.
+# --------------------------------------------------------------------------
+
+
+@mcp.tool()
+def vault_patch(
+    path: str,
+    target: str,
+    operation: str = "replace",
+    content: str = "",
+    target_scope: str = "content",
+) -> str:
+    """Edit one section of a note, addressed by its heading.
+
+    Args:
+        path: Vault-relative path, e.g. "Pets/Levi.md".
+        target: Heading to act on. A bare name works whenever it is unique in
+            the note; otherwise join ancestors with "::", as
+            "Cottage Pie::Mash::Method". Call vault_map to see the paths. If
+            the target is ambiguous the error lists exactly which paths to
+            choose between - re-call with one of them.
+        operation: "replace", "prepend" or "append".
+        content: The markdown to write.
+        target_scope: "content" (default, the section body), "marker" (the
+            heading line only) or "markerAndContent" (both).
+    """
+    return _do(operations.patch, path, target, operation, content, target_scope)
+
+
+@mcp.tool()
+def vault_append(path: str, content: str, create_if_missing: bool = False) -> str:
+    """Append a block to the end of a note.
+
+    Args:
+        path: Vault-relative path.
+        content: The markdown to append.
+        create_if_missing: Create the note if it does not exist. The content is
+            written verbatim, so include frontmatter yourself.
+    """
+    return _do(operations.append, path, content, create_if_missing)
+
+
+@mcp.tool()
+def vault_write(path: str, content: str, overwrite: bool = False) -> str:
+    """Create a note, or replace one wholesale.
+
+    Include frontmatter: type, title, description, tags, timestamp. Prefer
+    vault_patch for editing part of an existing note.
+
+    Args:
+        path: Vault-relative path. Parent directories are created as needed.
+        content: The complete note.
+        overwrite: Required to replace an existing note. Without it an existing
+            path is an error, so a create can never silently clobber.
+    """
+    return _do(operations.write, path, content, overwrite)
+
+
+@mcp.tool()
+def vault_set_frontmatter(path: str, key: str, value: str | list | None = None, delete: bool = False) -> str:
+    """Set or remove one frontmatter field, leaving the rest of the block alone.
+
+    Args:
+        path: Vault-relative path.
+        key: Field name, e.g. "description" or "tags". A field that does not
+            exist yet is inserted in the order Conventions mandates.
+        value: The value. A list for "tags"; for "expires", a list of
+            {"date": "YYYY-MM-DD", "what": "..."} entries - pass every entry,
+            as the whole block is replaced and a dropped date stops being
+            checked silently.
+        delete: Remove the field instead of setting it.
+    """
+    return _do(operations.set_frontmatter, path, key, value, delete)
+
+
+@mcp.tool()
+def vault_delete(path: str) -> str:
+    """Delete a note. There is no trash; the vault's git history is the undo.
+
+    Args:
+        path: Vault-relative path.
+    """
+    return _do(operations.delete, path)
+
+
+@mcp.tool()
+def vault_move(source: str, destination: str, update_links: bool = True) -> str:
+    """Move or rename a note and repoint every link to it.
+
+    Moving notes changes the vault's structure, so confirm with the user first.
+    Update index.md afterwards.
+
+    Args:
+        source: Current vault-relative path.
+        destination: New vault-relative path. Parent directories are created.
+        update_links: Rewrite internal links pointing at the old path.
+    """
+    return _do(operations.move, source, destination, update_links)
 
 
 # --------------------------------------------------------------------------
 # ASGI app: transport security, then auth
 # --------------------------------------------------------------------------
+
+# --------------------------------------------------------------------------
+# REST surface
+#
+# n8n's HTTP Request nodes send a raw markdown body to a path-shaped URL. Route
+# shapes mirror obsidian-local-rest-api so migrating a node is a find-and-replace
+# on the URL and the auth header, not a rewrite into JSON-RPC.
+# --------------------------------------------------------------------------
+
+
+async def _body(request: Request) -> str:
+    return (await request.body()).decode("utf-8")
+
+
+async def vault_endpoint(request: Request) -> PlainTextResponse:
+    path = request.path_params["path"]
+    method = request.method
+
+    try:
+        if method == "GET":
+            section = request.query_params.get("section")
+            return PlainTextResponse(vault.read_note(path, section))
+        if method == "PUT":
+            return PlainTextResponse(
+                operations.write(path, await _body(request), overwrite=True)
+            )
+        if method == "POST":
+            return PlainTextResponse(
+                operations.append(path, await _body(request), create_if_missing=True)
+            )
+        if method == "PATCH":
+            heading = request.headers.get("target")
+            if not heading:
+                raise vault.VaultError("PATCH needs a Target header naming the heading")
+            return PlainTextResponse(
+                operations.patch(
+                    path,
+                    heading,
+                    request.headers.get("operation", "replace"),
+                    await _body(request),
+                    request.headers.get("target-scope", "content"),
+                )
+            )
+        if method == "DELETE":
+            return PlainTextResponse(operations.delete(path))
+    except vault.VaultError as exc:
+        # 400, not 500: every one of these is the caller's path or target, and
+        # the message is written to be actionable rather than diagnostic.
+        return PlainTextResponse(str(exc), status_code=400)
+
+    return PlainTextResponse(f"{method} not supported on /vault", status_code=405)
+
+
+rest_app = Starlette(
+    routes=[
+        Route(
+            "/vault/{path:path}",
+            vault_endpoint,
+            methods=["GET", "PUT", "POST", "PATCH", "DELETE"],
+        )
+    ]
+)
+
+
+class VaultRoutes:
+    """Serve /vault/* from the REST app, everything else from the MCP app.
+
+    A wrapper rather than a parent Starlette app so the MCP app keeps owning the
+    lifespan that starts the index, the watcher and the session manager. Only
+    http scopes are diverted; lifespan and everything else pass straight through.
+    """
+
+    def __init__(self, mcp_app, rest) -> None:
+        self.mcp_app = mcp_app
+        self.rest = rest
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] == "http" and scope["path"].startswith("/vault"):
+            return await self.rest(scope, receive, send)
+        return await self.mcp_app(scope, receive, send)
+
 
 app = mcp.streamable_http_app(
     streamable_http_path="/mcp",
@@ -224,6 +434,8 @@ app = mcp.streamable_http_app(
         allowed_origins=["*"],  # no browser origin - MCP clients only
     ),
 )
+
+app = VaultRoutes(app, rest_app)
 
 
 class BearerAuth:
@@ -262,7 +474,9 @@ app = BearerAuth(app, settings.api_key)
 
 def main() -> None:
     log.info(
-        "serving MCP on %s:%d/mcp (allowed hosts: %s)",
+        "serving MCP on %s:%d/mcp and REST on %s:%d/vault/<path> (allowed hosts: %s)",
+        settings.host,
+        settings.port,
         settings.host,
         settings.port,
         ", ".join(settings.allowed_hosts),

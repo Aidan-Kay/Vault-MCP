@@ -256,6 +256,33 @@ def test_path_safety() -> None:
     check(".git is protected", vault.is_protected(Path(".git/config")), True)
 
 
+def test_walk_scopes_differ() -> None:
+    """The two walks answer different questions and must not be confused.
+
+    walk_notes() is "what belongs in the index"; walk_all_notes() is "what could
+    contain a link". Using the indexing walk for a link rewrite silently skipped
+    every note in Workflows/ and Reports/ - found in integration, not here, which
+    is why it is pinned now.
+    """
+    indexed = {p.relative_to(vault.ROOT).as_posix() for p in vault.walk_notes()}
+    everything = {p.relative_to(vault.ROOT).as_posix() for p in vault.walk_all_notes()}
+
+    check("the indexing walk is a subset", indexed <= everything, True)
+    generated = {p for p in everything if p.startswith(("Workflows/", "Reports/"))}
+    check("generated series exist to be linked", len(generated) > 0, True)
+    check("but are absent from the index walk", generated & indexed, set())
+    check(
+        "and present in the link-rewrite walk",
+        generated <= everything,
+        True,
+    )
+    check(
+        "neither walk sees hidden directories",
+        [p for p in everything if p.startswith(".")],
+        [],
+    )
+
+
 def test_symlink_rejected() -> None:
     """Two cases, rejected by two different rules.
 

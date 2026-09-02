@@ -266,6 +266,26 @@ def parse_note(rel_path: str) -> dict:
     }
 
 
+def walk_all_notes() -> list[Path]:
+    """Every readable markdown file, hidden directories aside.
+
+    Distinct from walk_notes(): that one answers "what belongs in the index",
+    this one answers "what could contain a link". Since the exclusion split,
+    Workflows/ and Reports/ are ordinary notes for every purpose except search,
+    so a link rewrite that used the indexing walk would silently skip 388 notes.
+    """
+    notes: list[Path] = []
+    for path in sorted(ROOT.rglob("*.md")):
+        try:
+            rel = path.relative_to(ROOT)
+        except ValueError:
+            continue
+        if _is_hidden(rel) or not path.is_file():
+            continue
+        notes.append(path)
+    return notes
+
+
 def walk_notes() -> list[Path]:
     """Every indexable markdown file, exclusions applied."""
     notes: list[Path] = []
