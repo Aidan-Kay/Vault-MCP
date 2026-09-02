@@ -39,7 +39,7 @@ class _Handler(FileSystemEventHandler):
             relative = path.resolve().relative_to(vault.ROOT)
         except ValueError:
             return
-        if vault._is_excluded(relative):
+        if vault.is_index_excluded(relative):
             return
         self._loop.call_soon_threadsafe(self._queue.put_nowait, path)
 
