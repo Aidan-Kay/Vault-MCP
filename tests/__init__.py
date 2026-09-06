@@ -8,5 +8,5 @@ vault actually contains, and a fixture would only prove it tolerates the fixture
 
 import os
 
-os.environ.setdefault("VAULT_INDEX_API_KEY", "test")
+os.environ.setdefault("VAULT_MCP_API_KEY", "test")
 os.environ.setdefault("VAULT_PATH", "/media/Share/Vault")

@@ -40,7 +40,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
 )
-log = logging.getLogger("vault-index")
+log = logging.getLogger("vault-mcp")
 
 
 # --------------------------------------------------------------------------
@@ -127,7 +127,7 @@ async def lifespan(_server: MCPServer) -> AsyncIterator[None]:
 
 
 mcp = MCPServer(
-    "vault-index",
+    "vault-mcp",
     instructions=(
         "Semantic and keyword search, reading and writing over the Obsidian "
         "vault. Prefer vault_search to locate information, then vault_read with "
@@ -459,7 +459,7 @@ class BearerAuth:
                     "type": "http.response.start",
                     "status": 401,
                     "headers": [
-                        (b"www-authenticate", b'Bearer realm="vault-index"'),
+                        (b"www-authenticate", b'Bearer realm="vault-mcp"'),
                         (b"content-type", b"text/plain; charset=utf-8"),
                     ],
                 }

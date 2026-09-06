@@ -360,7 +360,7 @@ def atomic_write(path: Path, text: str) -> None:
     mode = (path.stat().st_mode & 0o777) if path.exists() else NEW_FILE_MODE
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=".vault-index-", suffix=".tmp")
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=".vault-mcp-", suffix=".tmp")
     tmp = Path(tmp_name)
     try:
         # newline="" defeats universal-newline translation; the text is already LF.

@@ -215,7 +215,7 @@ def test_atomic_write() -> None:
         vault.atomic_write(nested, "deep")
         check("parent directories created", nested.exists(), True)
 
-        leftovers = [p.name for p in root.iterdir() if p.name.startswith(".vault-index-")]
+        leftovers = [p.name for p in root.iterdir() if p.name.startswith(".vault-mcp-")]
         check("no temp files left behind", leftovers, [])
 
 

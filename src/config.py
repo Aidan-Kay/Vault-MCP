@@ -55,11 +55,11 @@ class Settings:
 
 
 def load() -> Settings:
-    api_key = os.environ.get("VAULT_INDEX_API_KEY", "").strip()
+    api_key = os.environ.get("VAULT_MCP_API_KEY", "").strip()
     if not api_key:
         # Fail closed. An empty key must never be read as "auth disabled" for a
         # service that serves finances, insurance and addresses as plain text.
-        raise RuntimeError("VAULT_INDEX_API_KEY is unset - refusing to start")
+        raise RuntimeError("VAULT_MCP_API_KEY is unset - refusing to start")
 
     vault_path = Path(os.environ.get("VAULT_PATH", "/vault")).resolve()
     if not vault_path.is_dir():
@@ -70,7 +70,7 @@ def load() -> Settings:
     return Settings(
         vault_path=vault_path,
         api_key=api_key,
-        allowed_hosts=_csv("MCP_ALLOWED_HOSTS", "vault-index:8080,127.0.0.1:8090"),
+        allowed_hosts=_csv("MCP_ALLOWED_HOSTS", "vault-mcp:8080,127.0.0.1:8090"),
         ollama_url=ollama_url,
         embed_model=os.environ.get("EMBED_MODEL", "nomic-embed-text"),
         exclude_dirs=frozenset(_csv("EXCLUDE_DIRS", "Workflows,Reports,.obsidian")),
