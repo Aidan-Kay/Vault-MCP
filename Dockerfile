@@ -9,9 +9,9 @@ RUN apt-get update && \
 WORKDIR /src
 
 # Clone the repository (shallow clone — no history needed). Docker caches this
-# layer on the URL alone, so a new commit on master does NOT invalidate it:
+# layer on the URL alone, so a new commit on main does NOT invalidate it:
 # rebuild with `docker compose build --no-cache vault-mcp` to pick one up.
-RUN git clone --depth 1 https://github.com/Aidan-Kay/vault-mcp.git .
+RUN git clone --depth 1 https://github.com/Aidan-Kay/Vault-MCP.git .
 
 # ─── Runtime Stage ────────────────────────────────────────────────────────────
 FROM python:3.13-slim AS runtime

@@ -87,7 +87,7 @@ docker run --rm \
   vault-mcp
 ```
 
-Docker caches the clone layer on the URL alone, so a new commit on `master` does not
+Docker caches the clone layer on the URL alone, so a new commit on `main` does not
 invalidate it — rebuild with `--no-cache` to pick one up.
 
 ## Security
