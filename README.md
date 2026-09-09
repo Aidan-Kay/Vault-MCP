@@ -4,10 +4,6 @@ An MCP server and REST API over a local [Obsidian](https://obsidian.md) vault. I
 indexes the vault for hybrid search and serves read and write access to it through
 two interfaces backed by one implementation.
 
-It began as a retrieval layer — hence the original `vault-index` name — and now
-covers the write path as well, replacing `obsidian-local-rest-api` as the way the
-vault is edited programmatically.
-
 ## Why
 
 Two problems with the plugin it replaces:
@@ -92,15 +88,11 @@ invalidate it — rebuild with `--no-cache` to pick one up.
 
 ## Security
 
-The vault holds finances, insurance and addresses in plain text. The controls are:
-
 - **Bearer auth on both surfaces**, failing closed on an unset key.
 - **Path containment** in `safe_resolve()` — the single control on where writes land,
   since the vault is mounted read-write. Encoded traversal, `.git` and non-`.md`
   writes are all rejected.
 - **Host-header allowlist**, so the MCP transport is not reachable by DNS rebinding.
-- **Non-root uid 1000**, matching the vault's file ownership so written notes keep
-  the ownership Samba expects.
 
 ## Tests
 
