@@ -63,8 +63,15 @@ def append(path: str, content: str, create_if_missing: bool = False) -> str:
     rel = vault.relpath(resolved)
 
     if not resolved.exists():
-        vault.atomic_write(resolved, content)
-        return f"created {rel} with the supplied content (no frontmatter added)"
+        # The same tail as write(). Nothing is invented here either - frontmatter
+        # still has to arrive in `content` - but a note created down this branch
+        # now reaches disk under the rules every other write obeys. It used to be
+        # the one write path that skipped _timestamped, which meant the branch a
+        # model is told to prefer was also the only one that quietly broke the
+        # convention, and said "no frontmatter added" even when it was given some.
+        updated, note = _timestamped(content)
+        vault.atomic_write(resolved, updated)
+        return f"created {rel} with the supplied content{note}"
 
     updated = edit.append_to_note(vault.read_text(resolved), content)
     updated, note = _timestamped(updated)

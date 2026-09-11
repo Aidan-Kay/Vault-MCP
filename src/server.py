@@ -286,10 +286,9 @@ def vault_append(path: str, content: str, create_if_missing: bool = False) -> st
         path: Vault-relative path.
         content: The markdown to append.
         create_if_missing: Create the note instead of failing when the path is
-            absent. A note created this way is written from `content` verbatim -
-            no frontmatter and no timestamp are added - so include frontmatter
-            in `content` when the note should carry it. Appending to a note that
-            already exists bumps its timestamp as usual.
+            absent. Nothing is invented for you, so put frontmatter in `content`
+            when the note should carry any - its timestamp is then bumped for
+            you, exactly as on every other write.
     """
     return _do(operations.append, path, content, create_if_missing)
 
