@@ -135,7 +135,10 @@ mcp = MCPServer(
         "first and patch the '::' path it gives you - a bare heading name works "
         "whenever it is unique, and the error tells you what to prepend when it "
         "is not. Writes bump the note's timestamp for you; updating index.md is "
-        "still yours to do."
+        "still yours to do. Never probe for a note's existence before writing - "
+        "the write tools take the missing case as an argument "
+        "(vault_append's create_if_missing, vault_write's overwrite), so a read "
+        "or list first only buys a round trip."
     ),
     lifespan=lifespan,
 )
@@ -272,13 +275,21 @@ def vault_patch(
 
 @mcp.tool()
 def vault_append(path: str, content: str, create_if_missing: bool = False) -> str:
-    """Append a block to the end of a note.
+    """Append a block to the end of a note, creating it if the path is absent.
+
+    Do not read or list first to find out whether the note is there - pass
+    create_if_missing=True and this one call covers both cases. A probe
+    beforehand costs a whole round trip to answer a question this tool already
+    takes as an argument.
 
     Args:
         path: Vault-relative path.
         content: The markdown to append.
-        create_if_missing: Create the note if it does not exist. The content is
-            written verbatim, so include frontmatter yourself.
+        create_if_missing: Create the note instead of failing when the path is
+            absent. A note created this way is written from `content` verbatim -
+            no frontmatter and no timestamp are added - so include frontmatter
+            in `content` when the note should carry it. Appending to a note that
+            already exists bumps its timestamp as usual.
     """
     return _do(operations.append, path, content, create_if_missing)
 
@@ -288,13 +299,16 @@ def vault_write(path: str, content: str, overwrite: bool = False) -> str:
     """Create a note, or replace one wholesale.
 
     Include frontmatter: type, title, description, tags, timestamp. Prefer
-    vault_patch for editing part of an existing note.
+    vault_patch for editing part of an existing note, and vault_append when you
+    only want to add to the end - neither needs the note looked up first.
 
     Args:
         path: Vault-relative path. Parent directories are created as needed.
         content: The complete note.
         overwrite: Required to replace an existing note. Without it an existing
-            path is an error, so a create can never silently clobber.
+            path is an error, so a create can never silently clobber. Set it
+            from your intent rather than from a lookup: pass it when you mean
+            "create or replace", leave it off when the note must be new.
     """
     return _do(operations.write, path, content, overwrite)
 
