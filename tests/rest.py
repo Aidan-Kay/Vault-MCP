@@ -400,15 +400,25 @@ def test_status_codes() -> None:
     )
     check("a bad target is 400, not 404", bad_target.status_code, 400)
 
-    # Percent-encoded, because an unencoded ../ is normalised away by the client
-    # before the server ever sees it - which would make this assert nothing.
-    # Containment is a refusal, not an absence: answering 404 here would tell a
+    # The separators are encoded too, so this stays a single path segment. An
+    # unencoded ../ is normalised away by the client, and even %2E%2E between
+    # real slashes is normalised by the ASGI server - in both cases the path
+    # stops starting with /vault and is refused by the router without ever
+    # reaching the resolver. Safe, but a different mechanism, and asserting on
+    # it here would leave containment itself untested. Verified against the
+    # running server: this form arrives intact and safe_resolve refuses it.
+    #
+    # Containment is a refusal, not an absence: answering 404 would tell a
     # caller the path was merely missing.
-    check(
-        "an escaping path is 400, not 404",
-        call("GET", "/vault/%2E%2E/%2E%2E/etc/passwd").status_code,
-        400,
-    )
+    escaping = call("GET", "/vault/%2E%2E%2Fetc%2Fpasswd")
+    check("an escaping path is 400, not 404", escaping.status_code, 400)
+    check_in("and says it escaped rather than that it is missing", "escapes the vault", escaping.text)
+
+    # Resolving through a parent back into the vault is not an escape, and must
+    # not be reported as one - it is an ordinary missing note.
+    inward = call("GET", "/vault/Notes/%2E%2E/Nope.md")
+    check("a path that resolves back inside is a plain 404", inward.status_code, 404)
+    check_in("and names the resolved path", "no such path", inward.text)
     check(
         "a non-.md write is 400, not 404",
         call("PUT", "/vault/Notes/Alpha.txt", content="x").status_code,
