@@ -1,0 +1,442 @@
+"""The REST surface n8n calls, and the three things it could not do before.
+
+These exist because of a migration: n8n reached the vault through
+obsidian-local-rest-api, which enforced none of the containment, protection or
+write-scoping this server does, and three call shapes stood in the way of
+pointing it here instead. Each is covered below, along with the one behaviour
+that deliberately differs from the plugin.
+
+    the structured read   GET with an Accept header, answered as JSON
+    frontmatter PATCH     Target-Type: frontmatter, the claim in claim-before-act
+    /frontmatter          find notes by an exact field value, without the index
+
+The claim is the correctness-critical one. `status: "approved"` written with its
+quotes intact compares equal to nothing downstream, and a status that never
+matches is a proposal that can never be resolved - so the assertions here are on
+the bytes in the YAML, not on the call succeeding.
+
+Requests go through the real `app`, so they cross BearerAuth and the prefix
+routing on the way in. This runner writes, so it builds its own temp vault.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import shutil
+import sys
+import tempfile
+from pathlib import Path
+
+# Before `from src import ...`, and an assignment rather than setdefault:
+# tests/__init__ has already pointed this at the real vault, and this runner
+# must not write there.
+_VAULT = Path(tempfile.mkdtemp(prefix="vault-rest-"))
+os.environ["VAULT_PATH"] = str(_VAULT)
+
+import httpx  # noqa: E402
+
+from src.server import app  # noqa: E402
+
+FAILURES: list[str] = []
+
+
+def check(name: str, actual, expected) -> None:
+    if actual == expected:
+        return
+    FAILURES.append(f"{name}\n    expected: {expected!r}\n    actual:   {actual!r}")
+
+
+def check_in(name: str, needle: str, haystack: str) -> None:
+    if needle in haystack:
+        return
+    FAILURES.append(f"{name}\n    expected to contain: {needle!r}\n    actual: {haystack!r}")
+
+
+def report() -> int:
+    for failure in FAILURES:
+        print(f"FAIL {failure}")
+    return len(FAILURES)
+
+
+# --------------------------------------------------------------------------
+# Fixture vault
+#
+# Workflows/Approvals is deliberate: it is in EXCLUDE_DIRS, so it is invisible
+# to search, and it is where every note the frontmatter query exists to find
+# actually lives. A query that quietly used the index would return nothing here
+# and pass every other assertion in this file.
+# --------------------------------------------------------------------------
+
+PROPOSAL = """---
+type: proposal
+title: {title}
+description: A proposal awaiting a decision.
+tags: [approval, lyra]
+status: {status}
+thread_id: "{thread}"
+rev: 1
+timestamp: 2026-09-12T09:00:00Z
+---
+
+# {title}
+
+## Summary
+
+The body of the proposal.
+"""
+
+NOTE = """---
+type: note
+title: Alpha
+description: An ordinary note.
+tags:
+  - lyra
+  - ops
+timestamp: 2026-09-12T09:00:00Z
+---
+
+# Alpha
+
+## Summary
+
+First section.
+
+## Detail
+
+Second section.
+"""
+
+BROKEN = """---
+title: Broken
+tags: [unclosed
+  : : :
+---
+
+# Broken
+
+A note whose YAML does not parse.
+"""
+
+
+def write_fixture() -> None:
+    """A pristine vault, rebuilt before each test.
+
+    Rebuilt rather than shared because the claim test changes the very statuses
+    the query test counts. Coupling those would make one of them pass or fail on
+    the order they happen to be called in, which is not a property either is
+    trying to assert.
+    """
+    for child in _VAULT.iterdir():
+        shutil.rmtree(child) if child.is_dir() else child.unlink()
+    (_VAULT / "Workflows" / "Approvals").mkdir(parents=True)
+    (_VAULT / "Notes").mkdir(parents=True)
+    for name, status, thread in (
+        ("a1", "pending", "1547"),
+        ("a2", "approved", "1548"),
+        ("a3", "pending", "1549"),
+    ):
+        (_VAULT / "Workflows" / "Approvals" / f"{name}.md").write_text(
+            PROPOSAL.format(title=name, status=status, thread=thread), encoding="utf-8"
+        )
+    (_VAULT / "Notes" / "Alpha.md").write_text(NOTE, encoding="utf-8")
+    (_VAULT / "Notes" / "Broken.md").write_text(BROKEN, encoding="utf-8")
+
+
+def read_note(rel: str) -> str:
+    return (_VAULT / rel).read_text(encoding="utf-8")
+
+
+# --------------------------------------------------------------------------
+# Driving the app
+# --------------------------------------------------------------------------
+
+JSON_ACCEPT = "application/json"
+OLRAPI_ACCEPT = "application/vnd.olrapi.note+json"
+
+
+async def _call(method: str, url: str, *, headers=None, content=None) -> httpx.Response:
+    transport = httpx.ASGITransport(app=app)
+    sent = {"Authorization": "Bearer test"}
+    sent.update(headers or {})
+    async with httpx.AsyncClient(transport=transport, base_url="http://vault-mcp:8080") as c:
+        return await c.request(method, url, headers=sent, content=content)
+
+
+def call(method: str, url: str, *, headers=None, content=None) -> httpx.Response:
+    return asyncio.run(_call(method, url, headers=headers, content=content))
+
+
+# --------------------------------------------------------------------------
+# 2.1  The structured read
+# --------------------------------------------------------------------------
+
+
+def test_structured_read() -> None:
+    write_fixture()
+    plain = call("GET", "/vault/Notes/Alpha.md")
+    check("no Accept header still returns markdown", plain.status_code, 200)
+    check("markdown body is the note verbatim", plain.text, NOTE)
+    check_in("markdown content-type", "text/plain", plain.headers["content-type"])
+
+    for label, accept in (("application/json", JSON_ACCEPT), ("the vendor type", OLRAPI_ACCEPT)):
+        got = call("GET", "/vault/Notes/Alpha.md", headers={"Accept": accept})
+        check(f"{label} returns 200", got.status_code, 200)
+        # The deliberate difference from the plugin. n8n does not treat the
+        # vendor type as JSON, so answering with it would hand the workflow a
+        # string; answering application/json makes n8n parse it.
+        check_in(f"{label} is answered as JSON", "application/json", got.headers["content-type"])
+        body = got.json()
+        check(f"{label}: path", body["path"], "Notes/Alpha.md")
+        check(f"{label}: content", body["content"], NOTE)
+        check(f"{label}: title", body["frontmatter"]["title"], "Alpha")
+        check(f"{label}: tags", body["frontmatter"]["tags"], ["lyra", "ops"])
+        check(f"{label}: no stat or tags key invented", sorted(body), ["content", "frontmatter", "path"])
+
+    scoped = call(
+        "GET", "/vault/Notes/Alpha.md?section=Detail", headers={"Accept": JSON_ACCEPT}
+    ).json()
+    check("section= narrows content", scoped["content"].strip().splitlines()[0], "## Detail")
+    check("section= leaves frontmatter whole", scoped["frontmatter"]["title"], "Alpha")
+
+    # Malformed YAML must not make a note unreadable. `Get Triage Rules` wants
+    # the content; a parse failure in a field it never mentions should not be
+    # what stops it.
+    broken = call("GET", "/vault/Notes/Broken.md", headers={"Accept": JSON_ACCEPT})
+    check("malformed YAML still returns 200", broken.status_code, 200)
+    check("malformed YAML yields empty frontmatter", broken.json()["frontmatter"], {})
+    check_in("malformed YAML still returns content", "does not parse", broken.json()["content"])
+
+
+# --------------------------------------------------------------------------
+# 2.2  The claim: PATCH with Target-Type: frontmatter
+# --------------------------------------------------------------------------
+
+
+def test_frontmatter_patch() -> None:
+    write_fixture()
+    got = call(
+        "PATCH",
+        "/vault/Workflows/Approvals/a1.md",
+        headers={"Target": "status", "Target-Type": "frontmatter", "Operation": "replace"},
+        content=json.dumps("approved"),
+    )
+    check("claiming a status returns 200", got.status_code, 200)
+    # The whole point. A quoted value here compares equal to nothing downstream.
+    check_in("status is written unquoted", "\nstatus: approved\n", read_note("Workflows/Approvals/a1.md"))
+    check("the JSON string's quotes are not written", '"approved"' in read_note("Workflows/Approvals/a1.md"), False)
+
+    call(
+        "PATCH",
+        "/vault/Workflows/Approvals/a1.md",
+        headers={"Target": "rev", "Target-Type": "frontmatter"},
+        content="2",
+    )
+    check_in("a number stays a number", "\nrev: 2\n", read_note("Workflows/Approvals/a1.md"))
+
+    call(
+        "PATCH",
+        "/vault/Workflows/Approvals/a1.md",
+        headers={"Target": "thread_id", "Target-Type": "frontmatter"},
+        content=json.dumps("1547000"),
+    )
+    check_in("a thread id round-trips", "thread_id: 1547000", read_note("Workflows/Approvals/a1.md"))
+
+    # A bare word is not JSON. Rejecting it is what stops `approved` and
+    # `"approved"` quietly becoming different values in the same field.
+    before = read_note("Workflows/Approvals/a2.md")
+    bad = call(
+        "PATCH",
+        "/vault/Workflows/Approvals/a2.md",
+        headers={"Target": "status", "Target-Type": "frontmatter"},
+        content="approved",
+    )
+    check("an unquoted body is refused", bad.status_code, 400)
+    check_in("and says what was expected", "must be JSON", bad.text)
+    check("and changes nothing", read_note("Workflows/Approvals/a2.md"), before)
+
+    # set_frontmatter replaces outright, so an append would discard the rest of
+    # a list rather than add to it.
+    appended = call(
+        "PATCH",
+        "/vault/Workflows/Approvals/a2.md",
+        headers={"Target": "tags", "Target-Type": "frontmatter", "Operation": "append"},
+        content=json.dumps("extra"),
+    )
+    check("append on frontmatter is refused", appended.status_code, 400)
+    check_in("and names the supported operation", "'replace'", appended.text)
+    check("and changes nothing", read_note("Workflows/Approvals/a2.md"), before)
+
+    unknown = call(
+        "PATCH",
+        "/vault/Workflows/Approvals/a2.md",
+        headers={"Target": "status", "Target-Type": "elsewhere"},
+        content=json.dumps("approved"),
+    )
+    check("an unknown Target-Type is refused", unknown.status_code, 400)
+    check_in("and lists the ones that work", "'frontmatter'", unknown.text)
+    check("and changes nothing", read_note("Workflows/Approvals/a2.md"), before)
+
+    # The existing behaviour, which must survive the branch that was added
+    # around it - both when Target-Type says heading and when it is absent.
+    for headers in (
+        {"Target": "Summary", "Target-Type": "heading"},
+        {"Target": "Summary"},
+    ):
+        patched = call(
+            "PATCH", "/vault/Notes/Alpha.md", headers=headers, content="Rewritten.\n"
+        )
+        check(f"heading patch still works ({headers})", patched.status_code, 200)
+    check_in("the heading's section was replaced", "Rewritten.", read_note("Notes/Alpha.md"))
+    check_in("and its neighbour was not", "Second section.", read_note("Notes/Alpha.md"))
+
+    missing_target = call(
+        "PATCH", "/vault/Notes/Alpha.md", headers={"Target-Type": "frontmatter"}, content='"x"'
+    )
+    check("PATCH without a Target is refused", missing_target.status_code, 400)
+
+    # The reason for the migration, asserted on the new write path: a frontmatter
+    # PATCH reaches the vault through the same guard every other write does.
+    protected = call(
+        "PATCH",
+        "/vault/index.md",
+        headers={"Target": "status", "Target-Type": "frontmatter"},
+        content='"anything"',
+    )
+    check("index.md is protected from a frontmatter PATCH", protected.status_code, 400)
+    check_in("and says why", "protected", protected.text)
+
+
+# --------------------------------------------------------------------------
+# 2.3  The frontmatter query
+# --------------------------------------------------------------------------
+
+
+def names(response: httpx.Response) -> list[str]:
+    return sorted(hit["filename"] for hit in response.json())
+
+
+def test_frontmatter_query() -> None:
+    write_fixture()
+    # Every note here is under Workflows/, which is in EXCLUDE_DIRS. A query
+    # served from the semantic index would return an empty list.
+    pending = call("GET", "/frontmatter?key=status&value=pending")
+    check("pending proposals are found", pending.status_code, 200)
+    check(
+        "and only the pending ones",
+        names(pending),
+        ["Workflows/Approvals/a1.md", "Workflows/Approvals/a3.md"],
+    )
+    check_in("answered as JSON", "application/json", pending.headers["content-type"])
+    check("each hit carries filename", sorted(pending.json()[0]), ["filename"])
+
+    thread = call("GET", "/frontmatter?key=thread_id&value=1549")
+    check("a quoted scalar matches unquoted", names(thread), ["Workflows/Approvals/a3.md"])
+
+    check("nothing matching is an empty list", call("GET", "/frontmatter?key=status&value=nope").json(), [])
+    check("an absent key is an empty list", call("GET", "/frontmatter?key=nosuch&value=x").json(), [])
+
+    # Both list shapes this vault writes, since a key that silently matched
+    # nothing would look exactly like a key with no matches.
+    check(
+        "inline list membership matches",
+        names(call("GET", "/frontmatter?key=tags&value=approval")),
+        ["Workflows/Approvals/a1.md", "Workflows/Approvals/a2.md", "Workflows/Approvals/a3.md"],
+    )
+    check(
+        "block list membership matches",
+        names(call("GET", "/frontmatter?key=tags&value=ops")),
+        ["Notes/Alpha.md"],
+    )
+    check(
+        "a value in both shapes finds both",
+        names(call("GET", "/frontmatter?key=tags&value=lyra")),
+        [
+            "Notes/Alpha.md",
+            "Workflows/Approvals/a1.md",
+            "Workflows/Approvals/a2.md",
+            "Workflows/Approvals/a3.md",
+        ],
+    )
+
+    narrowed = call("GET", "/frontmatter?key=tags&value=lyra&dir=Notes")
+    check("dir= narrows the walk", names(narrowed), ["Notes/Alpha.md"])
+
+    check("key= is required", call("GET", "/frontmatter?value=pending").status_code, 400)
+    check("value= is required", call("GET", "/frontmatter?key=status").status_code, 400)
+    check_in(
+        "and the error shows the shape",
+        "key=status&value=pending",
+        call("GET", "/frontmatter?key=status").text,
+    )
+    check("an empty value is a real query, not a missing one",
+          call("GET", "/frontmatter?key=status&value=").status_code, 200)
+    check("a dir that is not there is 404", call("GET", "/frontmatter?key=status&value=pending&dir=Nope").status_code, 404)
+    check("a dir that is a note is 400", call("GET", "/frontmatter?key=status&value=pending&dir=Notes/Alpha.md").status_code, 400)
+
+
+# --------------------------------------------------------------------------
+# 4  Missing is 404, everything else is 400
+# --------------------------------------------------------------------------
+
+
+def test_status_codes() -> None:
+    write_fixture()
+    missing = call("GET", "/vault/Notes/Nope.md")
+    check("a missing note is 404", missing.status_code, 404)
+    check_in("and says so", "no such path", missing.text)
+    check(
+        "including on the structured read",
+        call("GET", "/vault/Notes/Nope.md", headers={"Accept": JSON_ACCEPT}).status_code,
+        404,
+    )
+    check("and on a write to one", call("DELETE", "/vault/Notes/Nope.md").status_code, 404)
+
+    # The distinction is the point: a caller branching on "no such proposal"
+    # must not also catch its own malformed target.
+    bad_target = call(
+        "PATCH", "/vault/Notes/Alpha.md", headers={"Target": "No Such Heading"}, content="x"
+    )
+    check("a bad target is 400, not 404", bad_target.status_code, 400)
+
+    # Percent-encoded, because an unencoded ../ is normalised away by the client
+    # before the server ever sees it - which would make this assert nothing.
+    # Containment is a refusal, not an absence: answering 404 here would tell a
+    # caller the path was merely missing.
+    check(
+        "an escaping path is 400, not 404",
+        call("GET", "/vault/%2E%2E/%2E%2E/etc/passwd").status_code,
+        400,
+    )
+    check(
+        "a non-.md write is 400, not 404",
+        call("PUT", "/vault/Notes/Alpha.txt", content="x").status_code,
+        400,
+    )
+
+    check("auth is still enforced", asyncio.run(_unauthenticated()), 401)
+
+
+async def _unauthenticated() -> int:
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://vault-mcp:8080") as c:
+        return (await c.get("/frontmatter?key=status&value=pending")).status_code
+
+
+def main() -> int:
+    test_structured_read()
+    test_frontmatter_patch()
+    test_frontmatter_query()
+    test_status_codes()
+    if report():
+        return 1
+    print("rest: all checks passed")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    finally:
+        shutil.rmtree(_VAULT, ignore_errors=True)

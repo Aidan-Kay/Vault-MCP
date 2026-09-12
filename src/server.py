@@ -25,7 +25,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import PlainTextResponse
+from starlette.responses import JSONResponse, PlainTextResponse
 from starlette.routing import Route
 
 from . import operations
@@ -436,6 +436,12 @@ def vault_move(source: str, destination: str, update_links: bool = True) -> str:
 # n8n's HTTP Request nodes send a raw markdown body to a path-shaped URL. Route
 # shapes mirror obsidian-local-rest-api so migrating a node is a find-and-replace
 # on the URL and the auth header, not a rewrite into JSON-RPC.
+#
+# The point of the mirroring is to close the second door. n8n reached the vault
+# through the plugin, which enforced no containment, no protection for the
+# generated index.md and no write scoping - so those were guarantees about one
+# API rather than about the vault. Everything the plugin offered that n8n
+# actually used is answerable here, which is what lets it be switched off.
 # --------------------------------------------------------------------------
 
 
@@ -443,14 +449,99 @@ async def _body(request: Request) -> str:
     return (await request.body()).decode("utf-8")
 
 
-async def vault_endpoint(request: Request) -> PlainTextResponse:
+def _failed(exc: vault.VaultError) -> PlainTextResponse:
+    """One VaultError, as the status code a caller can branch on.
+
+    404 for a note that is not there, 400 for everything else. The distinction
+    exists because "no such note" is the one error a caller routinely *routes
+    on* rather than logs - a missing proposal is an ordinary outcome of
+    reconciliation, a malformed target is a bug - and a caller that only ever
+    sees 400 has to read the message to tell them apart.
+
+    Never 500: every one of these is the caller's path, target or body, and the
+    message is written to be acted on rather than to diagnose the server.
+    """
+    return PlainTextResponse(
+        str(exc), status_code=404 if isinstance(exc, vault.NotFound) else 400
+    )
+
+
+class VaultJSON(JSONResponse):
+    """JSONResponse that cannot be stopped by whatever YAML resolved a field to.
+
+    vault.metadata() already renders dates back to the text the note carries, so
+    this should never fire on a note in this vault. It is here because the
+    alternative when it does is a 500 on an otherwise valid read - a note with
+    one unusual frontmatter value should not become an unreadable note.
+    """
+
+    def render(self, content) -> bytes:
+        return json.dumps(
+            content, default=str, ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8")
+
+
+# obsidian-local-rest-api signalled the structured read with its own media type.
+# It is accepted here so a migrating node needs nothing but its URL changed, but
+# the response is always application/json - see _structured_read. This constant
+# can go once nothing sends it.
+OLRAPI_NOTE_JSON = "application/vnd.olrapi.note+json"
+
+
+def _structured_read(request: Request, path: str) -> JSONResponse | PlainTextResponse:
+    """GET a note as JSON when asked for it, as markdown otherwise.
+
+    Answered as `application/json`, never as the vendor type, even when the
+    vendor type is what was requested. That is the one place this differs from
+    the plugin and it is deliberate: n8n does not recognise the vendor type as
+    JSON, so it hands the body to the workflow as a *string* in `$json.data`,
+    and a node written against that shape reads `undefined` from real JSON.
+    Answering real JSON makes such a node throw on its next run rather than
+    silently succeed with nothing, which is the failure anyone would rather
+    have.
+    """
+    section = request.query_params.get("section")
+    accept = request.headers.get("accept", "")
+    if OLRAPI_NOTE_JSON not in accept and "application/json" not in accept:
+        return PlainTextResponse(vault.read_note(path, section))
+    return VaultJSON(vault.note_json(path, section))
+
+
+def _patch_frontmatter(path: str, key: str, operation: str, body: str) -> PlainTextResponse:
+    """PATCH with `Target-Type: frontmatter` - set one key from a JSON body.
+
+    The body is JSON-*decoded*, not taken as written: `rev` arrives as the
+    number 2 and a status as the quoted string "approved". Writing those quotes
+    into the YAML would change what every status comparison downstream sees,
+    which is the kind of break that surfaces three workflows away from its
+    cause.
+    """
+    if operation != "replace":
+        # set_frontmatter replaces the key outright. Accepting "append" here
+        # would quietly discard the rest of a list rather than add to it, and a
+        # refusal is the only honest answer until there is a caller to build for.
+        raise vault.VaultError(
+            f"Operation {operation!r} is not supported on frontmatter; only "
+            "'replace' is. Read the key and replace it with the value you want."
+        )
+    try:
+        value = json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise vault.VaultError(
+            "a frontmatter PATCH body must be JSON, so a string needs its "
+            f"quotes: got {body[:80]!r}, expected something like \"approved\" "
+            f"or 2 ({exc})"
+        ) from exc
+    return PlainTextResponse(operations.set_frontmatter(path, key, value))
+
+
+async def vault_endpoint(request: Request) -> JSONResponse | PlainTextResponse:
     path = request.path_params["path"]
     method = request.method
 
     try:
         if method == "GET":
-            section = request.query_params.get("section")
-            return PlainTextResponse(vault.read_note(path, section))
+            return _structured_read(request, path)
         if method == "PUT":
             return PlainTextResponse(
                 operations.write(path, await _body(request), overwrite=True)
@@ -460,14 +551,27 @@ async def vault_endpoint(request: Request) -> PlainTextResponse:
                 operations.append(path, await _body(request), create_if_missing=True)
             )
         if method == "PATCH":
-            heading = request.headers.get("target")
-            if not heading:
-                raise vault.VaultError("PATCH needs a Target header naming the heading")
+            target = request.headers.get("target")
+            if not target:
+                raise vault.VaultError(
+                    "PATCH needs a Target header naming the heading, or naming "
+                    "the frontmatter key when Target-Type is 'frontmatter'"
+                )
+            target_type = request.headers.get("target-type", "heading").strip().lower()
+            operation = request.headers.get("operation", "replace")
+
+            if target_type == "frontmatter":
+                return _patch_frontmatter(path, target, operation, await _body(request))
+            if target_type != "heading":
+                raise vault.VaultError(
+                    f"unsupported Target-Type {target_type!r}; use 'heading' "
+                    "(the default) or 'frontmatter'"
+                )
             return PlainTextResponse(
                 operations.patch(
                     path,
-                    heading,
-                    request.headers.get("operation", "replace"),
+                    target,
+                    operation,
                     await _body(request),
                     request.headers.get("target-scope", "content"),
                 )
@@ -475,11 +579,36 @@ async def vault_endpoint(request: Request) -> PlainTextResponse:
         if method == "DELETE":
             return PlainTextResponse(operations.delete(path))
     except vault.VaultError as exc:
-        # 400, not 500: every one of these is the caller's path or target, and
-        # the message is written to be actionable rather than diagnostic.
-        return PlainTextResponse(str(exc), status_code=400)
+        return _failed(exc)
 
     return PlainTextResponse(f"{method} not supported on /vault", status_code=405)
+
+
+async def frontmatter_endpoint(request: Request) -> JSONResponse | PlainTextResponse:
+    """Find notes by an exact frontmatter value: /frontmatter?key=&value=&dir=
+
+    A narrow replacement for the plugin's jsonlogic search, which every caller
+    used to ask the same single question - one field, one exact value. Answers a
+    list of {"filename": "<vault-relative path>"}, which is all any consumer
+    read out of it.
+
+    Never touches the semantic index: Workflows/ is in EXCLUDE_DIRS and so is
+    absent from search entirely, and that is exactly where the notes this finds
+    live.
+    """
+    key = request.query_params.get("key", "").strip()
+    value = request.query_params.get("value")
+    try:
+        if not key or value is None:
+            raise vault.VaultError(
+                "/frontmatter needs key= and value=, as "
+                "/frontmatter?key=status&value=pending. Add dir= to walk one "
+                "folder instead of the whole vault."
+            )
+        matches = vault.find_by_frontmatter(key, value, request.query_params.get("dir"))
+    except vault.VaultError as exc:
+        return _failed(exc)
+    return VaultJSON([{"filename": name} for name in matches])
 
 
 rest_app = Starlette(
@@ -488,13 +617,17 @@ rest_app = Starlette(
             "/vault/{path:path}",
             vault_endpoint,
             methods=["GET", "PUT", "POST", "PATCH", "DELETE"],
-        )
+        ),
+        Route("/frontmatter", frontmatter_endpoint, methods=["GET"]),
     ]
 )
 
 
+REST_PREFIXES = ("/vault", "/frontmatter")
+
+
 class VaultRoutes:
-    """Serve /vault/* from the REST app, everything else from the MCP app.
+    """Serve the REST prefixes from the REST app, everything else from MCP.
 
     A wrapper rather than a parent Starlette app so the MCP app keeps owning the
     lifespan that starts the index, the watcher and the session manager. Only
@@ -506,7 +639,7 @@ class VaultRoutes:
         self.rest = rest
 
     async def __call__(self, scope, receive, send) -> None:
-        if scope["type"] == "http" and scope["path"].startswith("/vault"):
+        if scope["type"] == "http" and scope["path"].startswith(REST_PREFIXES):
             return await self.rest(scope, receive, send)
         return await self.mcp_app(scope, receive, send)
 
@@ -611,11 +744,12 @@ app = BearerAuth(app, settings.api_key)
 
 def main() -> None:
     log.info(
-        "serving MCP on %s:%d/mcp and REST on %s:%d/vault/<path> (allowed hosts: %s)",
+        "serving MCP on %s:%d/mcp and REST on %s:%d%s (allowed hosts: %s)",
         settings.host,
         settings.port,
         settings.host,
         settings.port,
+        "{/vault/<path>,/frontmatter}",
         ", ".join(settings.allowed_hosts),
     )
     uvicorn.run(app, host=settings.host, port=settings.port, log_level="info", access_log=False)

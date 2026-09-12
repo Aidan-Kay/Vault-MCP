@@ -40,6 +40,34 @@ shape `obsidian-local-rest-api` used. n8n's HTTP Request nodes speak plain REST 
 cannot easily build a JSON-RPC envelope, so migrating a node is a find-and-replace on
 the URL and the auth header rather than a rewrite into JSON-RPC.
 
+| Call | Does |
+| --- | --- |
+| `GET /vault/<path>` | The note's markdown. `?section=` narrows it to one heading. |
+| `GET /vault/<path>` with `Accept: application/json` | `{path, content, frontmatter}` |
+| `PUT /vault/<path>` | Create or replace, body is the note |
+| `POST /vault/<path>` | Append, creating the note if it is absent |
+| `PATCH /vault/<path>` | `Target:` a heading, or a frontmatter key with `Target-Type: frontmatter` |
+| `DELETE /vault/<path>` | Remove the note |
+| `GET /frontmatter?key=&value=` | Notes whose field holds that exact value, as `[{"filename": …}]`. `&dir=` narrows the walk to one folder. |
+
+A frontmatter `PATCH` takes a **JSON** body, so `"approved"` needs its quotes and `2`
+does not: the value is decoded rather than copied, because writing the quotes into the
+YAML would change what every comparison downstream sees.
+
+`/frontmatter` walks the filesystem and never the semantic index — `Workflows/` is in
+`EXCLUDE_DIRS` and so is absent from search entirely, which is exactly where the notes
+it is asked about live.
+
+Two deliberate differences from the plugin it replaces:
+
+- **The structured read answers `application/json`**, never the vendor
+  `application/vnd.olrapi.note+json`, even when that is what was requested. n8n does
+  not recognise the vendor type as JSON and hands the body to the workflow as a string
+  in `$json.data`; answering real JSON makes a node written against that shape throw
+  rather than silently succeed with nothing.
+- **A missing note is `404`**, where every other rejected path, target or body is
+  `400`. "No such note" is the one error a caller routes on rather than logs.
+
 Both surfaces call `src/operations.py`, so the resolver and the vault conventions are
 applied once regardless of how the caller arrived. Every write bumps the note's
 `timestamp`, or reports why it could not.
@@ -170,10 +198,14 @@ python -m tests.resolve_all
 python -m tests.resolve_leaves
 python -m tests.write_scope
 python -m tests.indexdoc
+python -m tests.rest
 ```
 
-The last two write, so they build their own temp vault rather than touching the real
-one. `tests.indexdoc` covers the generated document: coverage, folder-derived
+The last three write, so they build their own temp vault rather than touching the real
+one. `tests.rest` drives the REST surface through the real app — the structured read,
+the frontmatter `PATCH` that is the claim in claim-before-act, the frontmatter query,
+and that a missing note is a 404 where a refused one is a 400. `tests.indexdoc` covers
+the generated document: coverage, folder-derived
 headings, incremental updates on create, edit, move and delete, that `index.md` is
 refused to every writer and still readable, and that an edit changing nothing the
 index displays does not rewrite it.

@@ -14,7 +14,7 @@ import re
 import tempfile
 from contextvars import ContextVar
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from .config import settings
@@ -22,6 +22,16 @@ from .config import settings
 
 class VaultError(ValueError):
     """Raised for a rejected path or an unreadable note."""
+
+
+class NotFound(VaultError):
+    """Raised when a path that had to exist does not.
+
+    A subclass rather than a message the caller matches on, because the REST
+    surface answers 404 for this and 400 for every other VaultError, and a
+    status code derived from a string is a status code that breaks the next time
+    the string is reworded. Every MCP caller still sees a plain VaultError.
+    """
 
 
 # Resolved once. If VAULT_PATH is itself a symlink, this is the real target,
@@ -201,7 +211,7 @@ def safe_resolve(rel_path: str, *, must_exist: bool = True, writing: bool = Fals
             )
 
     if must_exist and not candidate.exists():
-        raise VaultError(f"no such path in the vault: {rel.as_posix()!r}")
+        raise NotFound(f"no such path in the vault: {rel.as_posix()!r}")
 
     return candidate
 
@@ -321,26 +331,81 @@ def list_dir(rel_path: str = "") -> list[dict]:
     return entries
 
 
-def parse_note(rel_path: str) -> dict:
+def _as_written(value):
+    """YAML's typed scalars, back to the text the note actually carries.
+
+    PyYAML resolves `timestamp: 2026-09-12T09:00:00Z` to a datetime, and every
+    note in this vault carries a timestamp. Passed on that way it is not JSON
+    at all, and anything that does serialise it renders a *different string*
+    from the one in the file - so a consumer comparing timestamps would be
+    comparing against a shape the vault has never written. Rendered back in the
+    vault's own format, `frontmatter.timestamp` is the text on disk, which is
+    the only thing a caller can sensibly have meant.
+
+    Recursive, because `expires` is a list of mappings with a date in each.
+    """
+    if isinstance(value, datetime):  # before date - datetime is a subclass
+        utc = value.astimezone(timezone.utc) if value.tzinfo else value
+        return utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {key: _as_written(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_as_written(item) for item in value]
+    return value
+
+
+def metadata(text: str) -> dict:
+    """A note's frontmatter as a dict, or {} if it has none or it is malformed.
+
+    Malformed YAML must not make a note unreadable: a caller that asked for the
+    content gets the content, and an empty block, rather than an error about a
+    field it never mentioned.
+    """
     # Imported here, not at module scope: reading YAML metadata is the only
     # thing in this module that needs it. The write path is deliberately
     # surgical and never round-trips a note through a parser, so the resolver
     # and its tests must not drag the dependency in.
     import frontmatter
 
+    try:
+        return {key: _as_written(value) for key, value in frontmatter.loads(text).metadata.items()}
+    except Exception:
+        return {}
+
+
+def parse_note(rel_path: str) -> dict:
     path = safe_resolve(rel_path)
     text = read_text(path)
-    try:
-        post = frontmatter.loads(text)
-        meta = dict(post.metadata)
-    except Exception:
-        meta = {}  # malformed YAML must not make a note unreadable
     return {
         "path": relpath(path),
-        "frontmatter": meta,
+        "frontmatter": metadata(text),
         "headings": [
             {"depth": h.depth, "text": h.text, "line": h.line} for h in iter_headings(text)
         ],
+    }
+
+
+def note_json(rel_path: str, section: str | None = None) -> dict:
+    """A note as {path, content, frontmatter} - the structured read.
+
+    The shape obsidian-local-rest-api returned for
+    `Accept: application/vnd.olrapi.note+json`, minus `tags` and `stat`, which
+    no caller reads. It exists so a consumer that wants one frontmatter field
+    does not have to parse YAML out of a markdown string itself.
+
+    `section` narrows `content` exactly as read_note does; `frontmatter` is
+    always the whole note's, since a section does not have one of its own.
+    """
+    path = safe_resolve(rel_path)
+    if path.is_dir():
+        raise VaultError(f"{relpath(path)!r} is a directory - use vault_list")
+    text = read_text(path)
+    return {
+        "path": relpath(path),
+        "content": extract_section(text, section) if section else text,
+        "frontmatter": metadata(text),
     }
 
 
@@ -376,6 +441,105 @@ def walk_notes() -> list[Path]:
             continue
         notes.append(path)
     return notes
+
+
+# --------------------------------------------------------------------------
+# Frontmatter query
+#
+# Line-scanned rather than YAML-parsed, for the reason indexdoc.py is: this
+# reads every note in the vault on every call, and a note with malformed YAML
+# should drop out of one query rather than break it.
+# --------------------------------------------------------------------------
+
+_FM_QUERY_KEY = re.compile(r"^([A-Za-z_][A-Za-z0-9_-]*):(.*)$")
+_FM_LIST_ITEM = re.compile(r"^\s+-\s+(.*)$")
+
+
+def _unquoted(raw: str) -> str:
+    value = raw.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        value = value[1:-1]
+    return value
+
+
+def frontmatter_values(text: str, key: str) -> list[str] | None:
+    """Every scalar one frontmatter key carries, as written.
+
+    None when the note has no frontmatter block or does not carry the key at
+    all - which is not the same as carrying it empty, and the caller can tell.
+
+    Three shapes are recognised, which is every shape this vault writes:
+
+        key: value     ->  ["value"]
+        key: [a, b]    ->  ["a", "b"]
+        key:               ["a", "b"]
+          - a
+          - b
+
+    An inline list is split on commas, so a value containing one is not
+    addressable. Nothing in this vault writes one, and the alternative is a YAML
+    parser on every note of every query.
+    """
+    lines = text.lstrip("\ufeff").split("\n")
+    bounds = frontmatter_bounds(lines)
+    if bounds is None:
+        return None
+    start, end = bounds
+
+    for i in range(start, end):
+        match = _FM_QUERY_KEY.match(lines[i])
+        if not match or match.group(1) != key:
+            continue
+
+        inline = match.group(2).strip()
+        if inline.startswith("[") and inline.endswith("]"):
+            return [_unquoted(part) for part in inline[1:-1].split(",") if part.strip()]
+        if inline:
+            return [_unquoted(inline)]
+
+        # Empty after the colon: a block sequence, or a key with no value.
+        items: list[str] = []
+        for j in range(i + 1, end):
+            item = _FM_LIST_ITEM.match(lines[j])
+            if not item:
+                break
+            items.append(_unquoted(item.group(1)))
+        return items
+
+    return None
+
+
+def find_by_frontmatter(key: str, value: str, prefix: str | None = None) -> list[str]:
+    """Vault-relative paths of every note whose `key` carries `value`.
+
+    String equality against the value as written, and membership when the key
+    holds a list - so tags=lyra matches `tags: [lyra, ops]`. Frontmatter is
+    text here, so 2 and "2" are the same query; nothing that asks this asks it
+    of a number.
+
+    Deliberately a filesystem walk and never the semantic index. Workflows/ is
+    in EXCLUDE_DIRS and therefore absent from search entirely, and every note
+    this exists to find lives there. `prefix` narrows it to one folder and is
+    worth passing whenever the caller knows it - it is what turns reading the
+    whole vault into reading one directory.
+    """
+    scope = None
+    if prefix:
+        scope = safe_resolve(prefix)
+        if not scope.is_dir():
+            raise VaultError(f"{relpath(scope)!r} is not a directory")
+
+    matches: list[str] = []
+    for path in walk_all_notes():
+        if scope is not None and not path.is_relative_to(scope):
+            continue
+        try:
+            values = frontmatter_values(read_text(path), key)
+        except VaultError:
+            continue  # unreadable note drops out of the query, not the query out
+        if values and value in values:
+            matches.append(relpath(path))
+    return matches
 
 
 # --------------------------------------------------------------------------
