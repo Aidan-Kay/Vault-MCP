@@ -113,6 +113,34 @@ def set_frontmatter(path: str, key: str, value=None, delete: bool = False) -> st
     return f"{'removed' if delete else 'set'} {key!r} in {rel}"
 
 
+
+def set_body(path: str, content: str) -> str:
+    """Replace everything after the frontmatter, leaving the block untouched.
+
+    For a note whose prose is regenerated wholesale but whose frontmatter is
+    written once and kept - the weekly summaries. Their only option before was
+    PUT, which takes the frontmatter with it, so those notes ended up with none
+    at all and nothing in the vault could describe them.
+
+    A note with no frontmatter has no prefix to keep, so this is the same as a
+    PUT for it. That is the honest answer rather than an error: the caller asked
+    for the body to be the content, and afterwards it is.
+    """
+    resolved = vault.safe_resolve(path, writing=True)
+    rel = vault.relpath(resolved)
+    text = vault.read_text(resolved)
+
+    # Sliced rather than re-rendered. The frontmatter reaches disk as the exact
+    # bytes it already had, including any this server could not parse - four
+    # notes in the vault cannot be round-tripped through a YAML dump without
+    # losing everything in the block.
+    body = vault.without_frontmatter(text)
+    prefix = text[: len(text) - len(body)]
+
+    updated, note = _timestamped(prefix + vault.normalise_body(content))
+    vault.atomic_write(resolved, updated)
+    return f"replaced the body of {rel}{note}"
+
 def delete(path: str) -> str:
     """Delete a note. There is no trash - the vault's git history is the undo."""
     resolved = vault.safe_resolve(path, writing=True)

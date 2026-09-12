@@ -551,21 +551,36 @@ async def vault_endpoint(request: Request) -> JSONResponse | PlainTextResponse:
                 operations.append(path, await _body(request), create_if_missing=True)
             )
         if method == "PATCH":
+            target_type = request.headers.get("target-type", "heading").strip().lower()
+            operation = request.headers.get("operation", "replace")
+
+            # Checked before Target, because the body is the one target that
+            # does not need naming - there is exactly one of it.
+            if target_type == "body":
+                if operation != "replace":
+                    raise vault.VaultError(
+                        f"Operation {operation!r} is not supported on the body; "
+                        "only 'replace' is. POST to the note to add to the end "
+                        "of it."
+                    )
+                return PlainTextResponse(
+                    operations.set_body(path, await _body(request))
+                )
+
             target = request.headers.get("target")
             if not target:
                 raise vault.VaultError(
                     "PATCH needs a Target header naming the heading, or naming "
-                    "the frontmatter key when Target-Type is 'frontmatter'"
+                    "the frontmatter key when Target-Type is 'frontmatter'. "
+                    "Target-Type 'body' needs no Target."
                 )
-            target_type = request.headers.get("target-type", "heading").strip().lower()
-            operation = request.headers.get("operation", "replace")
 
             if target_type == "frontmatter":
                 return _patch_frontmatter(path, target, operation, await _body(request))
             if target_type != "heading":
                 raise vault.VaultError(
                     f"unsupported Target-Type {target_type!r}; use 'heading' "
-                    "(the default) or 'frontmatter'"
+                    "(the default), 'frontmatter' or 'body'"
                 )
             return PlainTextResponse(
                 operations.patch(

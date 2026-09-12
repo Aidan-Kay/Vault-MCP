@@ -469,6 +469,67 @@ def test_status_codes() -> None:
     check("auth is still enforced", asyncio.run(_unauthenticated()), 401)
 
 
+
+# --------------------------------------------------------------------------
+# 2.4  The body write: PATCH with Target-Type: body
+# --------------------------------------------------------------------------
+
+
+def test_body_patch() -> None:
+    """Replacing the prose must not take the frontmatter with it.
+
+    `Open WebUI: Sync Lyra System Prompt` regenerates Aidan Summary.md every
+    Saturday. With PUT as the only whole-note write, the note lost its
+    frontmatter on the first run and never had any again.
+    """
+    write_fixture()
+
+    done = call(
+        "PATCH",
+        "/vault/Notes/Alpha.md",
+        headers={"Target-Type": "body"},
+        content="# Alpha\n\nEntirely new prose.\n",
+    )
+    check("a body patch succeeds", done.status_code, 200)
+
+    got = call("GET", "/vault/Notes/Alpha.md", headers={"Accept": JSON_ACCEPT}).json()
+    check("the body is what was sent", got["body"], "# Alpha\n\nEntirely new prose.\n")
+    check("the title survived", got["frontmatter"]["title"], "Alpha")
+    check("so did the tags", got["frontmatter"]["tags"], ["lyra", "ops"])
+    check_in("and the block is still in content", "type: note", got["content"])
+    # The whole point: nothing of the old prose is left behind.
+    check("the old prose is gone", "First section." in got["body"], False)
+    # Every other write bumps it, and so must this one.
+    check(
+        "timestamp was bumped",
+        got["frontmatter"]["timestamp"] != "2026-09-12T09:00:00Z",
+        True,
+    )
+
+    # A block this server cannot parse is still carried across untouched. It is
+    # sliced, not re-rendered, so there is nothing for a YAML dump to lose.
+    call(
+        "PATCH",
+        "/vault/Notes/Broken.md",
+        headers={"Target-Type": "body"},
+        content="# Broken\n\nNew prose.\n",
+    )
+    broken = call("GET", "/vault/Notes/Broken.md", headers={"Accept": JSON_ACCEPT}).json()
+    check_in("a malformed block survives a body patch", "tags: [unclosed", broken["content"])
+    check("and the new prose is in place", broken["body"], "# Broken\n\nNew prose.\n")
+
+    # No Target header is needed, and sending Operation: append is refused
+    # rather than silently treated as a replace - POST already appends.
+    appended = call(
+        "PATCH",
+        "/vault/Notes/Alpha.md",
+        headers={"Target-Type": "body", "Operation": "append"},
+        content="more",
+    )
+    check("append is refused on the body", appended.status_code, 400)
+    check_in("and points at POST instead", "POST to the note", appended.text)
+
+
 async def _unauthenticated() -> int:
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://vault-mcp:8080") as c:
@@ -480,6 +541,7 @@ def main() -> int:
     test_frontmatter_patch()
     test_frontmatter_query()
     test_status_codes()
+    test_body_patch()
     if report():
         return 1
     print("rest: all checks passed")
