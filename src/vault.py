@@ -43,6 +43,28 @@ _FRONTMATTER_RE = re.compile(r"\A---[ \t]*\r?\n.*?\r?\n---[ \t]*\r?\n?", re.DOTA
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*?)(?:\s+#+)?\s*$")
 _FENCE_RE = re.compile(r"^\s{0,3}(```|~~~)")
 
+# One frontmatter key and everything after its colon. Public because
+# src.indexdoc scans the same blocks and a second copy of this pattern is a
+# second place for the vault's key syntax to drift.
+FM_KEY = re.compile(r"^([A-Za-z_][A-Za-z0-9_-]*):(.*)$")
+
+BOM = "\ufeff"
+
+
+def strip_bom(text: str) -> str:
+    """Drop a leading byte-order mark.
+
+    Written out rather than spelled with the character itself, which is
+    invisible in an editor: a literal BOM inside a string literal is deletable
+    by accident and leaves no visible diff when it goes.
+
+    Every line scanner over a frontmatter block needs this. A BOM'd note's first
+    line is the mark followed by '---' rather than '---' alone, and str.strip()
+    does not remove it - so the block is simply not found and the note silently
+    loses its metadata.
+    """
+    return text.lstrip(BOM)
+
 
 @dataclass(frozen=True, slots=True)
 class Heading:
@@ -237,6 +259,7 @@ def without_frontmatter(text: str) -> str:
     block, so a caller reading only the parsed fields would otherwise find the
     raw YAML pasted on the front of the note it asked for.
     """
+    text = strip_bom(text)
     match = _FRONTMATTER_RE.match(text)
     return text[match.end() :].lstrip("\r\n") if match else text
 
@@ -384,7 +407,8 @@ def metadata(text: str) -> dict:
     import frontmatter
 
     try:
-        return {key: _as_written(value) for key, value in frontmatter.loads(text).metadata.items()}
+        parsed = frontmatter.loads(strip_bom(text)).metadata
+        return {key: _as_written(value) for key, value in parsed.items()}
     except Exception:
         return {}
 
@@ -475,7 +499,6 @@ def walk_notes() -> list[Path]:
 # should drop out of one query rather than break it.
 # --------------------------------------------------------------------------
 
-_FM_QUERY_KEY = re.compile(r"^([A-Za-z_][A-Za-z0-9_-]*):(.*)$")
 _FM_LIST_ITEM = re.compile(r"^\s+-\s+(.*)$")
 
 
@@ -511,7 +534,7 @@ def frontmatter_values(text: str, key: str) -> list[str] | None:
     start, end = bounds
 
     for i in range(start, end):
-        match = _FM_QUERY_KEY.match(lines[i])
+        match = FM_KEY.match(lines[i])
         if not match or match.group(1) != key:
             continue
 
@@ -590,8 +613,6 @@ FIELD_ORDER = (
     "expires_reason",
 )
 
-_FM_KEY_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_-]*):")
-
 
 def utc_now() -> str:
     """The vault's timestamp format: YYYY-MM-DDTHH:MM:SSZ."""
@@ -602,11 +623,13 @@ def normalise_body(text: str) -> str:
     """LF line endings and exactly one trailing newline.
 
     check_vault_hygiene.py treats mixed endings as an error and a missing final
-    newline as a warning, so this is not cosmetic.
+    newline as a warning, so this is not cosmetic. A leading BOM goes the same
+    way and for the same reason: it is not content, and left in place it hides
+    the frontmatter block from every line scanner that follows.
     """
     if not text:
         return ""
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = strip_bom(text).replace("\r\n", "\n").replace("\r", "\n")
     return text.rstrip("\n") + "\n"
 
 
@@ -666,10 +689,10 @@ def _key_span(lines: list[str], start: int, end: int, key: str) -> tuple[int, in
     than only for `key: value` lines.
     """
     for i in range(start, end):
-        match = _FM_KEY_RE.match(lines[i])
+        match = FM_KEY.match(lines[i])
         if match and match.group(1) == key:
             j = i + 1
-            while j < end and not _FM_KEY_RE.match(lines[j]):
+            while j < end and not FM_KEY.match(lines[j]):
                 j += 1
             return i, j
     return None
@@ -697,7 +720,21 @@ def _scalar(value) -> str:
     is lost and the vault's convention is undisturbed - while quoting `"true"`,
     `"null"`, `"0123"` and anything carrying a `: ` that would otherwise parse
     as a mapping.
+
+    The round trip is the rule for every type, not only for strings. int, float
+    and bool all render to text YAML reads back as the same value, so str() is
+    the whole of their handling. None does not: `None` is not YAML's null, it is
+    the string "None", so there is no rendering of it that survives - which is
+    why it is refused rather than written.
     """
+    if value is None:
+        # set_frontmatter refuses a bare None before it reaches here, with a
+        # message naming delete=. This catches a None *inside* a list, where
+        # `- None` would come back as the string "None" with nothing to see.
+        raise VaultError(
+            "a frontmatter value cannot be null. Pass the value to set, or "
+            "delete the field."
+        )
     if not isinstance(value, str):
         return str(value)
 
@@ -751,7 +788,7 @@ def _insert_at(lines: list[str], start: int, end: int, key: str) -> int:
         return end
     rank = FIELD_ORDER.index(key)
     for i in range(start, end):
-        match = _FM_KEY_RE.match(lines[i])
+        match = FM_KEY.match(lines[i])
         if not match:
             continue
         existing = match.group(1)
@@ -761,7 +798,20 @@ def _insert_at(lines: list[str], start: int, end: int, key: str) -> int:
 
 
 def set_frontmatter(text: str, key: str, value=None, *, delete: bool = False) -> str:
-    """Set or remove one frontmatter key, leaving every other byte untouched."""
+    """Set or remove one frontmatter key, leaving every other byte untouched.
+
+    `value=None` is the signature's placeholder for "deleting, so no value" and
+    is refused on its own. It is what a caller sends by omitting the argument
+    and by PATCHing a JSON `null`, and neither means "write the text None" -
+    which is all that could be written, YAML having no way back from it.
+    """
+    if not delete and value is None:
+        raise VaultError(
+            f"no value given for {key!r}. Pass the value to set, or delete=true "
+            "to remove the field - a null is not a value this vault's "
+            "frontmatter carries."
+        )
+
     lines = normalise_body(text).split("\n")
     if lines and lines[-1] == "":
         lines.pop()  # split() leaves a trailing empty from the final newline

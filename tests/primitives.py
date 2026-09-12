@@ -198,6 +198,55 @@ def test_a_string_stays_a_string() -> None:
     check("a colon is quoted rather than left to parse as a mapping", back, "Outlook: dispatch an order")
 
 
+def test_null_is_refused_rather_than_written() -> None:
+    """`None` has no YAML spelling, so there is nothing honest to write.
+
+    Two callers send it without meaning to: vault_set_frontmatter with `value`
+    omitted - its default is None and `delete` defaults to False - and a REST
+    frontmatter PATCH whose body is `null`. Written out, `key: None` reads back
+    as the *string* "None", which is a field that compares equal to nothing and
+    looks deliberate in the note.
+    """
+    raises(
+        "a bare None is refused, not written",
+        lambda: vault.set_frontmatter(FM, "expires"),
+        "delete=true",
+    )
+    raises("and names the key it refused", lambda: vault.set_frontmatter(FM, "expires"), "'expires'")
+
+    # A None *inside* a list takes the same route, one level down.
+    # Not `tags`: that branch renders bare words without going near _scalar.
+    raises(
+        "a None inside a list is refused too",
+        lambda: vault.set_frontmatter(FM, "aliases", ["a", None]),
+        "cannot be null",
+    )
+
+    # delete=True is the call that legitimately passes no value.
+    out = vault.set_frontmatter(FM, "tags", delete=True)
+    check("delete still needs no value", "tags:" in out, False)
+
+    # The string "none" is a real value this vault writes, and must be unharmed.
+    check("the string 'none' is untouched", "expires: none" in vault.set_frontmatter(FM, "expires", "none"), True)
+
+
+def test_bom_does_not_hide_the_frontmatter() -> None:
+    """A BOM'd note must not read as a note with no frontmatter block.
+
+    A leading U+FEFF makes the first line the mark plus '---' rather than '---',
+    and str.strip() does not remove it - so every line scanner misses the block
+    and the note silently loses its metadata instead of failing.
+    """
+    bommed = "\ufeff" + FM
+    check("metadata still parses", vault.metadata(bommed)["title"], "Example")
+    check("the prose is still found", vault.without_frontmatter(bommed).startswith("# Example"), True)
+    check("a key is still queryable", vault.frontmatter_values(bommed, "tags"), ["one", "two"])
+
+    out = vault.set_frontmatter(bommed, "title", "Renamed")
+    check("the block is found and edited", "title: Renamed" in out, True)
+    check("and the mark is normalised away rather than kept", out.startswith("---"), True)
+
+
 def test_ordinary_scalars_stay_bare() -> None:
     """Quoting must be the exception, or every note churns on its next write."""
     for key, value in (
