@@ -43,16 +43,23 @@ the URL and the auth header rather than a rewrite into JSON-RPC.
 | Call | Does |
 | --- | --- |
 | `GET /vault/<path>` | The note's markdown. `?section=` narrows it to one heading. |
-| `GET /vault/<path>` with `Accept: application/json` | `{path, content, frontmatter}` |
+| `GET /vault/<path>` with `Accept: application/json` | `{path, content, body, frontmatter}` |
 | `PUT /vault/<path>` | Create or replace, body is the note |
 | `POST /vault/<path>` | Append, creating the note if it is absent |
-| `PATCH /vault/<path>` | `Target:` a heading, or a frontmatter key with `Target-Type: frontmatter` |
+| `PATCH /vault/<path>` | `Target:` a heading, or a frontmatter key with `Target-Type: frontmatter`, or the prose with `Target-Type: body` |
 | `DELETE /vault/<path>` | Remove the note |
 | `GET /frontmatter?key=&value=` | Notes whose field holds that exact value, as `[{"filename": …}]`. `&dir=` narrows the walk to one folder. |
 
+On the structured read, `content` is the file byte for byte and `body` is the same text
+with the frontmatter block removed — so a caller wanting the prose does not carry its
+own YAML regex, and a note whose block does not parse still comes back whole in
+`content`.
+
 A frontmatter `PATCH` takes a **JSON** body, so `"approved"` needs its quotes and `2`
 does not: the value is decoded rather than copied, because writing the quotes into the
-YAML would change what every comparison downstream sees.
+YAML would change what every comparison downstream sees. A `Target-Type: body` `PATCH`
+replaces the prose and leaves the frontmatter block exactly as it was, for notes whose
+text is regenerated on a schedule but whose metadata is written once.
 
 `/frontmatter` walks the filesystem and never the semantic index — `Workflows/` is in
 `EXCLUDE_DIRS` and so is absent from search entirely, which is exactly where the notes
@@ -75,44 +82,34 @@ applied once regardless of how the caller arrived. Every write bumps the note's
 ## The index is generated
 
 The vault's root `index.md` is one line per note — its title, a link, and its
-`description` — under headings that mirror the folder tree. It used to be written by
-hand, which made it the one convention every write depended on a model remembering,
-and the one it forgot: an entry whose description no longer matched the note, a new
-note that never got a line, a moved note still listed at its old path.
-
-Nothing in that document is a judgement call. The heading is the folder, the title and
-description are the note's own frontmatter, and the order is fixed — a folder's
-landing note first, then the rest by title. So it is derived rather than authored, and
-`src/indexdoc.py` derives it.
+`description` — under headings that mirror the folder tree. Nothing in it is a
+judgement call, so `src/indexdoc.py` derives it rather than asking a model to remember
+to update it. The rationale, and every fallback, is in that module's docstring.
 
 It is rebuilt from the **filesystem watcher**, not from the write path, so it does not
-matter how the change arrived: an MCP tool call, a REST `PUT` from n8n, or someone
-typing in Obsidian on the desktop all reach it the same way. A full scan runs once at
-startup — catching whatever moved while the container was down — and each change after
-that re-reads a single note, which is milliseconds rather than the few seconds a walk
-of the whole vault costs across the mount.
+matter how the change arrived — an MCP tool call, a REST `PUT` from n8n, or someone
+typing in Obsidian all reach it the same way. A full scan runs once at startup; each
+change after that re-reads a single note.
 
-Two properties it is worth knowing are deliberate:
+Two properties are deliberate:
 
-- **It only writes when the rendered body differs.** The vault is in git, and a
-  document that rewrote itself on every note edit would bury its own history under
-  commits whose only change is a timestamp. Editing a note's body does not touch it;
-  editing that note's `description` does.
-- **`index.md` is protected from every writer.** A write to it is not dangerous, it is
-  futile — the next change to any note overwrites it — and a tool that accepts a write
-  it is about to discard teaches the caller the edit worked. Fix a wrong line by
-  fixing the note's frontmatter. It stays readable.
+- **It only writes when the rendered body differs**, so a note edit that changes nothing
+  the index displays leaves `index.md` — and the vault's git history — alone.
+- **`index.md` is protected from every writer.** A write to it is futile rather than
+  dangerous, and a tool that accepts one teaches the caller the edit worked. Fix a wrong
+  line by fixing the note's `title` or `description`. It stays readable.
 
-Generated note series — the n8n workflow folders listed in `INDEX_DOC_EXCLUDE` — are
-not indexed note by note; the approvals folder alone would swamp the document. Each
-gets one line in its parent section saying so, and only when the folder actually
-exists.
+Generated note series — the folders in `INDEX_DOC_EXCLUDE` — are not indexed note by
+note; the approvals folder alone would swamp the document. Each gets one line in its
+parent section saying so, and only when the folder actually exists.
 
-**Scoped writes** at `/mcp/only/<path>` — the same MCP surface with this request's
-writes confined to one note (`/mcp/only/Workflows/Approvals/x.md`) or one folder
-(`/mcp/only/Workflows/Approvals`). Reads are never scoped: an agent confined to one
-note still has to read the conventions and whatever that note refers to. `vault_move`
-is refused outright while a scope is set, because rewriting inbound links touches every
+## Scoped writes
+
+`/mcp/only/<path>` is the same MCP surface with this request's writes confined to one
+note (`/mcp/only/Workflows/Approvals/x.md`) or one folder
+(`/mcp/only/Workflows/Approvals`). Reads are never scoped: an agent confined to one note
+still has to read the conventions and whatever that note refers to. `vault_move` is
+refused outright while a scope is set, because rewriting inbound links touches every
 note that points at the source.
 
 It rides on the URL rather than a header because that is the part a caller can vary per
@@ -186,7 +183,12 @@ invalidate it — rebuild with `--no-cache` to pick one up.
 - **Path containment** in `safe_resolve()` — the single control on where writes land,
   since the vault is mounted read-write. Encoded traversal, `.git`, `index.md` and
   non-`.md` writes are all rejected.
+- **Symlinks are refused outright**, checked on the *unresolved* path so `resolve()`
+  cannot follow one first. The vault has none and is not going to, and they are
+  creatable on this mount — so this fails loudly rather than reasoning about the window
+  between resolving a path and replacing a file.
 - **Host-header allowlist**, so the MCP transport is not reachable by DNS rebinding.
+- **Per-request write scoping** on `/mcp/only/<path>`, above.
 
 ## Tests
 
@@ -202,10 +204,14 @@ python -m tests.rest
 ```
 
 The last three write, so they build their own temp vault rather than touching the real
-one. `tests.rest` drives the REST surface through the real app — the structured read,
-the frontmatter `PATCH` that is the claim in claim-before-act, the frontmatter query,
-and that a missing note is a 404 where a refused one is a 400. `tests.indexdoc` covers
-the generated document: coverage, folder-derived
+one; the first three read the real vault, so they need it mounted.
+
+`tests.rest` drives the REST surface through the real app — the structured read, the
+frontmatter `PATCH` that is the claim in claim-before-act, the body `PATCH` that leaves
+the block alone, the frontmatter query, and that a missing note is a 404 where a refused
+one is a 400. `tests.indexdoc` covers the generated document: coverage, folder-derived
 headings, incremental updates on create, edit, move and delete, that `index.md` is
-refused to every writer and still readable, and that an edit changing nothing the
-index displays does not rewrite it.
+refused to every writer and still readable, and that an edit changing nothing the index
+displays does not rewrite it. `tests.primitives` covers the write traps that are silent
+corruption rather than errors — the values that must round-trip through YAML unchanged,
+and the ones that are refused because no spelling of them would.
