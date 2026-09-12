@@ -35,6 +35,7 @@ from . import vault
 from .config import settings
 from .embedder import Embedder
 from .index import VaultIndex
+from .indexdoc import IndexDoc
 from .watcher import VaultWatcher
 
 logging.basicConfig(
@@ -58,6 +59,10 @@ _build_started: float = 0.0
 _build_error: str | None = None
 _ready = False
 _reindex_lock = asyncio.Lock()
+
+_indexdoc: IndexDoc = IndexDoc(entries={})
+_indexdoc_lock = asyncio.Lock()
+_indexdoc_ready = False
 
 
 def _index_status() -> str:
@@ -95,6 +100,70 @@ async def _reindex(path: Path) -> None:
         )
 
 
+async def _scan_index_doc() -> None:
+    """Read every note once and reconcile index.md against them.
+
+    Runs at startup, so whatever was edited in Obsidian while the container was
+    down is picked up without anyone asking. Costs a few seconds across the
+    Samba mount, which is why it happens once and every later change swaps a
+    single entry instead.
+    """
+    global _indexdoc, _indexdoc_ready
+    async with _indexdoc_lock:
+        try:
+            # to_thread: blocking reads over the mount, and the loop is already
+            # serving vault_read and vault_list while this runs.
+            _indexdoc = await asyncio.to_thread(IndexDoc.build)
+        except Exception:
+            # _indexdoc_ready stays False, so no later change writes index.md
+            # from a half-built document. Stale beats truncated: the file on
+            # disk is still the last good one.
+            log.exception("index.md scan failed; it will not be updated until a restart")
+            return
+        _indexdoc_ready = True
+        wrote = await asyncio.to_thread(_indexdoc.write_if_changed)
+        log.info("index.md: %s", wrote or f"already current ({len(_indexdoc.entries)} entries)")
+
+
+async def _refresh_index_doc(path: Path) -> None:
+    """Bring index.md back in step after one note changed.
+
+    Held apart from _reindex and its lock on purpose. Search needs Ollama and
+    can be slow or unavailable; this needs neither, and the navigation document
+    should not stop updating because an embedding endpoint is down.
+    """
+    global _indexdoc
+    async with _indexdoc_lock:
+        if not _indexdoc_ready:
+            # The startup scan has not run yet. It reads the live filesystem, so
+            # it will see this write itself - doing an incremental update against
+            # an empty document here would render an index.md with one entry in it.
+            return
+
+        previous = _indexdoc
+        _indexdoc = await asyncio.to_thread(previous.replace_note, path)
+        if _indexdoc is previous:
+            return  # not an indexed note, so index.md cannot have changed
+        wrote = await asyncio.to_thread(_indexdoc.write_if_changed)
+        if wrote:
+            log.info("%s", wrote)
+
+
+async def _on_change(path: Path) -> None:
+    """One settled filesystem event, fanned out to both consumers.
+
+    index.md goes first and is awaited separately: it is the cheap one, and a
+    failed or slow re-embed must not leave the navigation document stale.
+    """
+    try:
+        await _refresh_index_doc(path)
+    except Exception:
+        log.exception("index.md refresh failed for %s", vault.relpath(path))
+
+    if _ready and not vault.is_index_excluded(path.resolve().relative_to(vault.ROOT)):
+        await _reindex(path)
+
+
 @asynccontextmanager
 async def lifespan(_server: MCPServer) -> AsyncIterator[None]:
     global _embedder, _build_started
@@ -106,19 +175,19 @@ async def lifespan(_server: MCPServer) -> AsyncIterator[None]:
     # Built in the background so vault_read / vault_list / vault_map serve
     # immediately and do not depend on Ollama being up.
     build_task = asyncio.create_task(_build_index(), name="index-build")
-    watcher = VaultWatcher(_reindex)
+    scan_task = asyncio.create_task(_scan_index_doc(), name="indexdoc-scan")
 
-    async def _watch_when_ready() -> None:
-        await build_task
-        if _ready:
-            await watcher.start()
-
-    watch_task = asyncio.create_task(_watch_when_ready(), name="watch-start")
+    # Started straight away, no longer behind the embedding build. It used to
+    # wait for it and give up if it failed, which was tolerable when search was
+    # all it fed; now it also keeps index.md current, and that must not stop
+    # because Ollama is down. _on_change skips the re-embed until _ready.
+    watcher = VaultWatcher(_on_change)
+    await watcher.start()
 
     try:
         yield
     finally:
-        for task in (watch_task, build_task):
+        for task in (scan_task, build_task):
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
@@ -135,8 +204,10 @@ mcp = MCPServer(
         "section= to pull only the heading you need. To edit, call vault_map "
         "first and patch the '::' path it gives you - a bare heading name works "
         "whenever it is unique, and the error tells you what to prepend when it "
-        "is not. Writes bump the note's timestamp for you; updating index.md is "
-        "still yours to do. Never probe for a note's existence before writing - "
+        "is not. Writes bump the note's timestamp for you, and the root index.md "
+        "is generated from every note's title and description - never edit it, "
+        "and never add an entry to it. Fix a wrong line there by fixing the "
+        "note's frontmatter. Never probe for a note's existence before writing - "
         "the write tools take the missing case as an argument "
         "(vault_append's create_if_missing, vault_write's overwrite), so a read "
         "or list first only buys a round trip."
@@ -345,7 +416,7 @@ def vault_move(source: str, destination: str, update_links: bool = True) -> str:
     """Move or rename a note and repoint every link to it.
 
     Moving notes changes the vault's structure, so confirm with the user first.
-    Update index.md afterwards.
+    index.md follows the move on its own - its headings are the folder tree.
 
     Args:
         source: Current vault-relative path.

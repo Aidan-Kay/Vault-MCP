@@ -39,8 +39,13 @@ class _Handler(FileSystemEventHandler):
             relative = path.resolve().relative_to(vault.ROOT)
         except ValueError:
             return
-        if vault.is_index_excluded(relative):
+        if vault.is_protected(relative):
             return
+        # Every other note goes through. The watcher used to drop anything
+        # is_index_excluded() named, which was the same question as "does search
+        # want this" - but index.md now has a say too, and it wants a different
+        # answer: Reports/PC/ is not searched yet is navigated. Deciding here
+        # would have to satisfy both, so the consumers decide instead.
         self._loop.call_soon_threadsafe(self._queue.put_nowait, path)
 
     def on_created(self, event: FileSystemEvent) -> None:

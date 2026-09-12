@@ -45,14 +45,23 @@ def _is_hidden(rel: Path) -> bool:
     return any(part.startswith(".") for part in rel.parts)
 
 
+INDEX_DOC = "index.md"
+
+
 def is_protected(rel: Path) -> bool:
     """True if this path must never be written.
 
     This is the *only* thing standing between Lyra and `rm -rf .git`, now that
     EXCLUDE_DIRS has been narrowed to indexing. Reads are unrestricted; writes
     go through here.
+
+    index.md joins the hidden directories because it is now generated from the
+    notes themselves. A write to it is not dangerous, it is futile - the next
+    change to any note overwrites it - and a tool that accepts a write it is
+    about to discard teaches the caller the edit worked. src.indexdoc writes it
+    through atomic_write directly, which is the same door _rewrite_links uses.
     """
-    return _is_hidden(rel)
+    return _is_hidden(rel) or rel.as_posix() == INDEX_DOC
 
 
 # The write scope for the request being served, or None for "anywhere".
@@ -108,8 +117,18 @@ def is_index_excluded(rel: Path) -> bool:
     Workflows/ and Reports/ are machine-generated series - noise in search, but
     ordinary notes to read and write. That distinction is the whole reason this
     is separate from is_protected().
+
+    index.md is excluded too, and for a sharper reason: every line in it is a
+    copy of a description that already sits in the note it points at, so
+    indexing it puts each of those sentences in the corpus twice and lets one
+    note win two slots in the same result set. It is also rewritten whenever the
+    vault changes, which would mean re-embedding the whole document each time.
     """
-    return _is_hidden(rel) or any(part in settings.exclude_dirs for part in rel.parts)
+    return (
+        _is_hidden(rel)
+        or rel.as_posix() == INDEX_DOC
+        or any(part in settings.exclude_dirs for part in rel.parts)
+    )
 
 
 def _reject_symlinks(raw: Path) -> None:

@@ -207,4 +207,4 @@ def move(source: str, destination: str, update_links: bool = True) -> str:
         message += f"; repointed links in {touched} note(s)"
     else:
         message += "; links NOT updated"
-    return message + ". Update index.md to match."
+    return message

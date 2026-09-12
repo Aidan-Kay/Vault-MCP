@@ -43,6 +43,7 @@ class Settings:
     ollama_url: str
     embed_model: str
     exclude_dirs: frozenset[str]
+    index_doc_exclude: tuple[str, ...]
     chunk_target_tokens: int
     chunk_overlap_tokens: int
     chunk_min_tokens: int
@@ -74,6 +75,19 @@ def load() -> Settings:
         ollama_url=ollama_url,
         embed_model=os.environ.get("EMBED_MODEL", "nomic-embed-text"),
         exclude_dirs=frozenset(_csv("EXCLUDE_DIRS", "Workflows,Reports,.obsidian")),
+        # Kept apart from EXCLUDE_DIRS on purpose. That one drops Workflows/ and
+        # Reports/ wholesale from *search*; index.md must not, because curated
+        # notes live inside both. These are the generated series only, and the
+        # list mirrors the "Excluded folders" table in Meta/Conventions.md.
+        index_doc_exclude=_csv(
+            "INDEX_DOC_EXCLUDE",
+            "Workflows/Approvals,"
+            "Workflows/Email Triage/Logs,"
+            "Reports/Daily Coffee Read,"
+            "Reports/Plex Music Recommendations,"
+            "Reports/Vault Maintenance,"
+            "Reports/Monthly Events Discovery",
+        ),
         chunk_target_tokens=_int("CHUNK_TARGET_TOKENS", 400),
         chunk_overlap_tokens=_int("CHUNK_OVERLAP_TOKENS", 60),
         chunk_min_tokens=_int("CHUNK_MIN_TOKENS", 120),

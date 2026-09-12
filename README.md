@@ -44,6 +44,42 @@ Both surfaces call `src/operations.py`, so the resolver and the vault convention
 applied once regardless of how the caller arrived. Every write bumps the note's
 `timestamp`, or reports why it could not.
 
+## The index is generated
+
+The vault's root `index.md` is one line per note — its title, a link, and its
+`description` — under headings that mirror the folder tree. It used to be written by
+hand, which made it the one convention every write depended on a model remembering,
+and the one it forgot: an entry whose description no longer matched the note, a new
+note that never got a line, a moved note still listed at its old path.
+
+Nothing in that document is a judgement call. The heading is the folder, the title and
+description are the note's own frontmatter, and the order is fixed — a folder's
+landing note first, then the rest by title. So it is derived rather than authored, and
+`src/indexdoc.py` derives it.
+
+It is rebuilt from the **filesystem watcher**, not from the write path, so it does not
+matter how the change arrived: an MCP tool call, a REST `PUT` from n8n, or someone
+typing in Obsidian on the desktop all reach it the same way. A full scan runs once at
+startup — catching whatever moved while the container was down — and each change after
+that re-reads a single note, which is milliseconds rather than the few seconds a walk
+of the whole vault costs across the mount.
+
+Two properties it is worth knowing are deliberate:
+
+- **It only writes when the rendered body differs.** The vault is in git, and a
+  document that rewrote itself on every note edit would bury its own history under
+  commits whose only change is a timestamp. Editing a note's body does not touch it;
+  editing that note's `description` does.
+- **`index.md` is protected from every writer.** A write to it is not dangerous, it is
+  futile — the next change to any note overwrites it — and a tool that accepts a write
+  it is about to discard teaches the caller the edit worked. Fix a wrong line by
+  fixing the note's frontmatter. It stays readable.
+
+Generated note series — the n8n workflow folders listed in `INDEX_DOC_EXCLUDE` — are
+not indexed note by note; the approvals folder alone would swamp the document. Each
+gets one line in its parent section saying so, and only when the folder actually
+exists.
+
 **Scoped writes** at `/mcp/only/<path>` — the same MCP surface with this request's
 writes confined to one note (`/mcp/only/Workflows/Approvals/x.md`) or one folder
 (`/mcp/only/Workflows/Approvals`). Reads are never scoped: an agent confined to one
@@ -76,7 +112,8 @@ server refuses to start without it rather than treating an empty key as "auth of
 | `EMBED_MODEL` | `nomic-embed-text` | Embedding model |
 | `EMBED_DIMS` | `768` | Embedding dimensions |
 | `EMBED_BATCH_SIZE` | `64` | Embedding requests per batch |
-| `EXCLUDE_DIRS` | `Workflows,Reports,.obsidian` | Folders left out of the index |
+| `EXCLUDE_DIRS` | `Workflows,Reports,.obsidian` | Folders left out of the search index |
+| `INDEX_DOC_EXCLUDE` | the six generated series | Folders left out of `index.md` |
 | `CHUNK_TARGET_TOKENS` | `400` | Target chunk size |
 | `CHUNK_OVERLAP_TOKENS` | `60` | Overlap between chunks |
 | `CHUNK_MIN_TOKENS` | `120` | Below this, a chunk merges into its neighbour |
@@ -84,8 +121,19 @@ server refuses to start without it rather than treating an empty key as "auth of
 | `WATCH_DEBOUNCE_SECONDS` | `2.0` | Filesystem-watch debounce before reindexing |
 | `BIND_HOST` / `BIND_PORT` | `0.0.0.0` / `8080` | Listen address |
 
-The index is built at startup and kept current by a filesystem watcher, so an edit
-made in Obsidian is searchable a moment later without a restart.
+`EXCLUDE_DIRS` and `INDEX_DOC_EXCLUDE` answer different questions and must not be
+merged. The first drops `Workflows/` and `Reports/` from search wholesale; the second
+cannot, because curated notes live inside both — `Workflows/Email Triage/Rules.md` and
+the `Reports/PC/` reports are navigated even though they are not searched.
+`INDEX_DOC_EXCLUDE` mirrors the "Excluded folders" table in the vault's
+`Meta/Conventions.md`; that table, this variable, `.scripts/check_frontmatter.py` and
+the vault's `.gitignore` are four copies of one list and have to move together.
+
+The search index is built at startup and kept current by a filesystem watcher, so an
+edit made in Obsidian is searchable a moment later without a restart. The watcher
+feeds `index.md` too, and does so independently: search needs Ollama and can be slow
+or unavailable, while the navigation document needs neither and must not stop updating
+because an embedding endpoint is down.
 
 ## Running
 
@@ -108,8 +156,8 @@ invalidate it — rebuild with `--no-cache` to pick one up.
 
 - **Bearer auth on both surfaces**, failing closed on an unset key.
 - **Path containment** in `safe_resolve()` — the single control on where writes land,
-  since the vault is mounted read-write. Encoded traversal, `.git` and non-`.md`
-  writes are all rejected.
+  since the vault is mounted read-write. Encoded traversal, `.git`, `index.md` and
+  non-`.md` writes are all rejected.
 - **Host-header allowlist**, so the MCP transport is not reachable by DNS rebinding.
 
 ## Tests
@@ -120,4 +168,12 @@ Standalone scripts, no test runner:
 python -m tests.primitives
 python -m tests.resolve_all
 python -m tests.resolve_leaves
+python -m tests.write_scope
+python -m tests.indexdoc
 ```
+
+The last two write, so they build their own temp vault rather than touching the real
+one. `tests.indexdoc` covers the generated document: coverage, folder-derived
+headings, incremental updates on create, edit, move and delete, that `index.md` is
+refused to every writer and still readable, and that an edit changing nothing the
+index displays does not rewrite it.

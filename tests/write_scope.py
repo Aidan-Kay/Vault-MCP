@@ -3,8 +3,12 @@
 The incident this exists for: an agent told in prose to "carry nothing out"
 replaced a whole section of the vault's root index.md while revising an
 unrelated note. A sentence in a prompt is not a guard, so the last case here is
-that exact shape - scoped to one note, aim a patch at index.md, and assert both
-that it is refused and that index.md is byte-identical afterwards.
+that exact shape - scoped to one note, aim a patch at a note outside the scope,
+and assert both that it is refused and that the note is byte-identical after.
+
+The target is Outside.md rather than index.md itself. index.md is generated now
+and protected from every writer, so aiming at it would pass whether or not the
+scope guard works at all - and a check that cannot fail is worse than no check.
 
 Unlike the other runners this one needs a *writable* vault, so it points
 VAULT_PATH at a temp tree before importing src. That has to happen before the
@@ -68,8 +72,12 @@ def report() -> int:
 
 def seed() -> None:
     (_VAULT / "Sub").mkdir(parents=True, exist_ok=True)
-    (_VAULT / "index.md").write_text(
-        "---\ntitle: Index\n---\n\n# Inbox\n\n- [One](Sub/One.md) - first\n- [Two](Sub/Two.md) - second\n",
+    # Stands in for the index.md of the original incident. index.md itself is
+    # now protected outright - it is generated, so no caller may write it - and
+    # aiming the scope checks at it would prove that protection rather than the
+    # scope guard, which is what this runner is for.
+    (_VAULT / "Outside.md").write_text(
+        "---\ntitle: Outside\n---\n\n# Inbox\n\n- [One](Sub/One.md) - first\n- [Two](Sub/Two.md) - second\n",
         encoding="utf-8",
     )
     (_VAULT / "Proposal.md").write_text(
@@ -84,7 +92,7 @@ def main() -> int:
 
     # --- unscoped: everything still works exactly as before -----------------
     allowed("unscoped write", lambda: operations.write("Sub/New.md", "---\ntitle: New\n---\n\nx\n"))
-    allowed("unscoped append", lambda: operations.append("index.md", "\ntrailing\n"))
+    allowed("unscoped append", lambda: operations.append("Outside.md", "\ntrailing\n"))
     check("unscoped scope is None", vault.current_write_scope(), None)
 
     # --- scoped to one note --------------------------------------------------
@@ -99,40 +107,40 @@ def main() -> int:
         )
         allowed("in-scope frontmatter", lambda: operations.set_frontmatter("Proposal.md", "rev", 1))
 
-        refused("out-of-scope append", lambda: operations.append("index.md", "\nsneaky\n"))
+        refused("out-of-scope append", lambda: operations.append("Outside.md", "\nsneaky\n"))
         refused("out-of-scope write", lambda: operations.write("Sub/Two.md", "x", overwrite=True))
         refused("out-of-scope delete", lambda: operations.delete("Sub/One.md"))
         refused(
             "out-of-scope frontmatter",
-            lambda: operations.set_frontmatter("index.md", "title", "hijacked"),
+            lambda: operations.set_frontmatter("Outside.md", "title", "hijacked"),
         )
 
         # Reads stay open. The agent revising a proposal still has to read the
         # conventions and whatever the note refers to.
-        allowed("in-scope read of another note", lambda: vault.read_note("index.md"))
+        allowed("in-scope read of another note", lambda: vault.read_note("Outside.md"))
 
         # Moving touches every note that links to the source, through a path
         # that never sees safe_resolve, so it is refused rather than narrowed.
         refused("move under a scope", lambda: operations.move("Proposal.md", "Proposal2.md"))
 
     check("scope cleared on exit", vault.current_write_scope(), None)
-    allowed("writes work again after the scope", lambda: operations.append("index.md", "\nafter\n"))
+    allowed("writes work again after the scope", lambda: operations.append("Outside.md", "\nafter\n"))
 
     # --- scoped to a directory ----------------------------------------------
     with vault.write_scope("Sub"):
         allowed("in-scope directory write", lambda: operations.append("Sub/One.md", "\nmore\n"))
-        refused("sibling of the directory", lambda: operations.append("index.md", "\nno\n"))
+        refused("sibling of the directory", lambda: operations.append("Outside.md", "\nno\n"))
         # A prefix must not match a sibling that merely starts with the same text.
         refused("prefix is not a substring", lambda: operations.write("Subterfuge.md", "x"))
 
     # --- the incident, reproduced -------------------------------------------
-    before = (_VAULT / "index.md").read_bytes()
+    before = (_VAULT / "Outside.md").read_bytes()
     with vault.write_scope("Proposal.md"):
         refused(
-            "the index.md overwrite that started all this",
-            lambda: operations.patch("index.md", "Inbox", "replace", "\n- one bullet\n"),
+            "the cross-note overwrite that started all this",
+            lambda: operations.patch("Outside.md", "Inbox", "replace", "\n- one bullet\n"),
         )
-    check("index.md untouched", (_VAULT / "index.md").read_bytes(), before)
+    check("the note outside the scope is untouched", (_VAULT / "Outside.md").read_bytes(), before)
 
     # --- the transport carries the scope, and only on the scoped path -------
     #
