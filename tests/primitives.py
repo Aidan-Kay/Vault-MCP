@@ -137,6 +137,65 @@ def test_no_quotes_added() -> None:
     check("scalar written unquoted", "title: Example" in out, True)
 
 
+def test_a_string_stays_a_string() -> None:
+    """A value must read back as the value it was set to.
+
+    The case that forced this: a Discord thread id written bare is an integer,
+    and one larger than JavaScript's MAX_SAFE_INTEGER, so n8n's JSON.parse
+    rounds it and the reply goes to a thread that does not exist. The plugin
+    quoted it; losing that on the way to Vault MCP would corrupt it silently.
+    """
+    import yaml
+
+    def roundtrip(key, value):
+        out = vault.set_frontmatter(FM, key, value)
+        line = next(ln for ln in out.splitlines() if ln.startswith(f"{key}:"))
+        return line, vault.metadata(out).get(key)
+
+    line, back = roundtrip("thread_id", "1548070648281038848")
+    check("a numeric string is quoted", line, 'thread_id: "1548070648281038848"')
+    check("and reads back as that exact string", back, "1548070648281038848")
+
+    # The whole point of quoting it: bare, YAML makes it an int.
+    check("bare, it would not have been", yaml.safe_load("1548070648281038848"), 1548070648281038848)
+
+    for value in ("true", "false", "null", "no", "0123", "1.0", "2026-09-12"):
+        line, back = roundtrip("thread_id", value)
+        check(f"{value!r} survives the round trip", back, value)
+
+    # A colon would otherwise make the rest of the line a mapping, and
+    # metadata() swallows a malformed block as {} - so the note would silently
+    # lose every field rather than one.
+    line, back = roundtrip("description", "Outlook: dispatch an order")
+    check("a colon is quoted rather than left to parse as a mapping", back, "Outlook: dispatch an order")
+
+
+def test_ordinary_scalars_stay_bare() -> None:
+    """Quoting must be the exception, or every note churns on its next write."""
+    for key, value in (
+        ("status", "approved"),
+        ("title", "Example"),
+        ("risk", "medium"),
+        ("description", "A note about things."),
+    ):
+        out = vault.set_frontmatter(FM, key, value)
+        check(f"{key} written bare", f"{key}: {value}" in out, True)
+
+    # timestamp is the one that would have been caught by a cruder rule: YAML
+    # resolves it to a datetime, but it renders back to the identical text, so
+    # there is nothing to protect and quoting it would fight the convention.
+    out = vault.set_frontmatter(FM, "timestamp", "2026-09-12T13:57:17Z")
+    check("timestamp stays unquoted", "timestamp: 2026-09-12T13:57:17Z" in out, True)
+    check("and still reads back as written", vault.metadata(out)["timestamp"], "2026-09-12T13:57:17Z")
+
+
+def test_numbers_are_still_numbers() -> None:
+    """rev is a number and must stay one; quoting everything would break it."""
+    out = vault.set_frontmatter(FM, "rev", 2)
+    check("an int is written bare", "rev: 2" in out, True)
+    check("and reads back as an int", vault.metadata(out)["rev"], 2)
+
+
 def test_patch_operations() -> None:
     replaced, path = edit.patch_section(FM, "Section", "replace", "New text.")
     check("resolved path reported back", path, "Example::Section")

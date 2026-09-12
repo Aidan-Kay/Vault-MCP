@@ -9,6 +9,7 @@ the :ro mount that used to back it up is gone.
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import re
 import tempfile
@@ -651,6 +652,46 @@ def _key_span(lines: list[str], start: int, end: int, key: str) -> tuple[int, in
     return None
 
 
+def _scalar(value) -> str:
+    """One frontmatter value as YAML that reads back as the value it was set to.
+
+    Only strings can need anything doing to them, and most need nothing: written
+    bare, `approved` reads back as "approved". The exception is a string whose
+    bare form YAML resolves to some *other* type, and the case that forced this
+    is a Discord thread id:
+
+        thread_id: 1548070648281038848
+
+    written bare, that is an integer. It is also larger than JavaScript's
+    Number.MAX_SAFE_INTEGER, so n8n's JSON.parse rounds it to ...038800 and the
+    reply goes to a thread that does not exist. obsidian-local-rest-api quoted
+    it and this has to as well, or moving n8n across silently corrupts it.
+
+    The test is a round trip rather than a list of dangerous-looking shapes: a
+    value is quoted exactly when reading it back would not return the same text.
+    That keeps `timestamp: 2026-09-12T13:57:17Z` bare - YAML resolves it to a
+    datetime, but `_as_written` renders that to the identical string, so nothing
+    is lost and the vault's convention is undisturbed - while quoting `"true"`,
+    `"null"`, `"0123"` and anything carrying a `: ` that would otherwise parse
+    as a mapping.
+    """
+    if not isinstance(value, str):
+        return str(value)
+
+    import yaml
+
+    try:
+        resolved = _as_written(yaml.safe_load(value))
+        if isinstance(resolved, str) and resolved == value:
+            return value
+    except Exception:  # noqa: BLE001 - unparseable bare means it must be quoted
+        pass
+
+    # json.dumps emits a double-quoted scalar with JSON's escapes, which YAML's
+    # double-quoted style accepts unchanged - and is the form the plugin wrote.
+    return json.dumps(value, ensure_ascii=False)
+
+
 def _render_value(key: str, value) -> list[str]:
     """Render one frontmatter key, in the shape Conventions mandates for it.
 
@@ -661,6 +702,9 @@ def _render_value(key: str, value) -> list[str]:
     """
     if isinstance(value, (list, tuple)):
         if key == "tags":
+            # Left bare deliberately. Conventions constrains tags to plain
+            # lowercase words, and quoting them would be the violation rather
+            # than the fix.
             joined = ", ".join(str(item) for item in value)
             return [f"{key}: [{joined}]"]
         out = [f"{key}:"]
@@ -670,12 +714,12 @@ def _render_value(key: str, value) -> list[str]:
                 keys = [k for k in ("date", "what") if k in entry]
                 keys += [k for k in entry if k not in keys]
                 first, *rest = keys
-                out.append(f"  - {first}: {entry[first]}")
-                out += [f"    {k}: {entry[k]}" for k in rest]
+                out.append(f"  - {first}: {_scalar(entry[first])}")
+                out += [f"    {k}: {_scalar(entry[k])}" for k in rest]
             else:
-                out.append(f"  - {entry}")
+                out.append(f"  - {_scalar(entry)}")
         return out
-    return [f"{key}: {value}"]
+    return [f"{key}: {_scalar(value)}"]
 
 
 def _insert_at(lines: list[str], start: int, end: int, key: str) -> int:

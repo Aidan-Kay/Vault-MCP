@@ -235,13 +235,29 @@ def test_frontmatter_patch() -> None:
     )
     check_in("a number stays a number", "\nrev: 2\n", read_note("Workflows/Approvals/a1.md"))
 
+    # A real snowflake, because the length is the point. Written bare this is an
+    # integer, and one past JavaScript's MAX_SAFE_INTEGER - n8n's JSON.parse
+    # would round it to ...038800 and the reply would go to a thread that does
+    # not exist. The plugin quoted it; so must this.
     call(
         "PATCH",
         "/vault/Workflows/Approvals/a1.md",
         headers={"Target": "thread_id", "Target-Type": "frontmatter"},
-        content=json.dumps("1547000"),
+        content=json.dumps("1548070648281038848"),
     )
-    check_in("a thread id round-trips", "thread_id: 1547000", read_note("Workflows/Approvals/a1.md"))
+    check_in(
+        "a thread id is quoted, so it stays a string",
+        'thread_id: "1548070648281038848"',
+        read_note("Workflows/Approvals/a1.md"),
+    )
+    # The assertion that actually matters: what a caller reads back.
+    got = call(
+        "GET", "/vault/Workflows/Approvals/a1.md", headers={"Accept": "application/json"}
+    )
+    fm = got.json()["frontmatter"]
+    check("and reads back as that exact string", fm["thread_id"], "1548070648281038848")
+    check("status still compares equal downstream", fm["status"], "approved")
+    check("rev is still a number, not a string", fm["rev"], 2)
 
     # A bare word is not JSON. Rejecting it is what stops `approved` and
     # `"approved"` quietly becoming different values in the same field.
