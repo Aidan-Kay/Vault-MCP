@@ -40,20 +40,13 @@ edit by hand - every entry is rewritten whenever the vault changes. To change a
 line here, change the note's `title` or `description`; to change a heading, move
 the note."""
 
-# Hand-written index text for notes that cannot carry frontmatter at all - the
-# prompt-injected files in Meta/Conventions.md, where YAML would leak into a
-# model's context. Without this their entry falls back to the first sentence of
-# the body, which reads as prose rather than as a description of the note.
-DESCRIPTION_OVERRIDES = {
-    "Tech/Linux Server/LLM Stack/Lyra System Prompts/Aidan Summary.md": (
-        "Detailed personal summary of Aidan — biography, personal life, technical "
-        "background, and interests, used as context for the Lyra assistant."
-    ),
-}
-
-_FM_KEY = re.compile(r"^([A-Za-z_][A-Za-z0-9_-]*):(.*)$")
 _H1 = re.compile(r"^#\s+(.+?)\s*#*\s*$")
 _SENTENCE_END = re.compile(r"(?<=[.!?])\s")
+
+# A YAML block scalar header: '|' or '>', then an indentation digit and a
+# chomping '+'/'-' in either order. The value is on the lines below it, so the
+# header itself must never reach the rendered entry.
+_BLOCK_SCALAR = re.compile(r"^[|>](?:[+-]?\d|\d?[+-]?)$")
 
 _FALLBACK_DESCRIPTION_CHARS = 240
 
@@ -102,7 +95,9 @@ def _folded(lines: list[str], end: int, key: str) -> str | None:
     """One frontmatter value, with YAML folded continuation lines joined.
 
     A description wrapped across lines has to compare - and render - as the
-    single line the index entry is.
+    single line the index entry is. Both of YAML's ways of wrapping one are
+    handled: a plain scalar continued by indentation, and a block scalar, whose
+    `>-` or `|` header announces the wrap and is not part of the value.
     """
     parts: list[str] = []
     capturing = False
@@ -113,9 +108,10 @@ def _folded(lines: list[str], end: int, key: str) -> str | None:
                 parts.append(line.strip())
                 continue
             capturing = False
-        match = _FM_KEY.match(line)
+        match = vault.FM_KEY.match(line)
         if match and match.group(1) == key:
-            parts.append(match.group(2).strip())
+            inline = match.group(2).strip()
+            parts.append("" if _BLOCK_SCALAR.match(inline) else inline)
             capturing = True
     if not parts:
         return None
@@ -145,15 +141,12 @@ def read_entry(path: Path, rel: str) -> Entry:
     prompt-injected files carry no frontmatter at all, and a note can be created
     with a body before anyone gives it a title.
     """
-    text = vault.read_text(path).lstrip("﻿")
-    lines = text.split("\n")
+    lines = vault.strip_bom(vault.read_text(path)).split("\n")
 
-    end = 0
-    if lines and lines[0].strip() == "---":
-        for i in range(1, len(lines)):
-            if lines[i].strip() == "---":
-                end = i
-                break
+    # 0 for a note with no block at all, which _folded and _first_sentence both
+    # read as "there is no frontmatter to look in".
+    bounds = vault.frontmatter_bounds(lines)
+    end = bounds[1] if bounds else 0
 
     title = _folded(lines, end, "title") if end else None
     if not title:
@@ -162,9 +155,7 @@ def read_entry(path: Path, rel: str) -> Entry:
             Path(rel).stem,
         )
 
-    description = DESCRIPTION_OVERRIDES.get(rel)
-    if description is None and end:
-        description = _folded(lines, end, "description")
+    description = _folded(lines, end, "description") if end else None
     if description is None:
         description = _first_sentence(lines, end + 1 if end else 0) or ""
 
@@ -256,8 +247,7 @@ def _exclusion_notes(folder: str, exclusions: list[str]) -> list[str]:
             continue
         lines.append(
             f"> `{clean}/` is a generated series, written by a workflow rather than "
-            "by hand, and is not indexed note by note. See "
-            "[Conventions](Meta/Conventions.md)."
+            "by hand, and is not indexed note by note."
         )
         lines.append("")
     return lines
@@ -308,12 +298,7 @@ def _body(text: str) -> str:
     The timestamp is regenerated on every render, so comparing whole documents
     would report a change every time and rewrite index.md on every note edit.
     """
-    lines = text.lstrip("﻿").split("\n")
-    if lines and lines[0].strip() == "---":
-        for i in range(1, len(lines)):
-            if lines[i].strip() == "---":
-                return "\n".join(lines[i + 1 :])
-    return text
+    return vault.without_frontmatter(text)
 
 
 @dataclass(slots=True)

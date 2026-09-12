@@ -88,6 +88,19 @@ def seed() -> None:
     write("Workflows/Approvals/2026-01-01 Thing.md", "proposal body\n")
     # No frontmatter at all, like the prompt-injected files in the real vault.
     write("Meta/Raw.md", "# Raw Heading\n\nFirst sentence here. Second one after it.\n")
+    # Both of YAML's ways of wrapping a description across lines. The index
+    # entry is one line, so each has to arrive as one line - and the block
+    # scalar's `>-` header is syntax, not part of the value.
+    write(
+        "Meta/Folded.md",
+        "---\ntitle: Folded\ndescription: >-\n  A description the author wrapped\n"
+        "  across two lines.\n---\n\nbody\n",
+    )
+    write(
+        "Meta/Plain.md",
+        "---\ntitle: Plain\ndescription: A description the author wrapped\n"
+        "  across two lines.\n---\n\nbody\n",
+    )
 
 
 def rebuild() -> tuple[indexdoc.IndexDoc, str]:
@@ -101,7 +114,7 @@ def main() -> int:
     doc, text = rebuild()
 
     # --- coverage -----------------------------------------------------------
-    check("every note but the generated one has an entry", len(doc.entries), 7)
+    check("every note but the generated one has an entry", len(doc.entries), 9)
     missing("a generated series is never indexed", text, "2026-01-01 Thing")
     missing("index.md does not index itself", text, "](index.md)")
 
@@ -135,6 +148,14 @@ def main() -> int:
     # --- fallbacks for a note with no frontmatter ---------------------------
     contains("title falls back to the note's H1", text, "- [Raw Heading](Meta/Raw.md)")
     contains("description falls back to the first sentence", text, "Raw.md) - First sentence here.")
+
+    # --- a wrapped description arrives as one line, either way it is written --
+    wrapped = "A description the author wrapped across two lines."
+    contains("a plain wrapped description is joined", text, f"](Meta/Plain.md) - {wrapped}")
+    contains("a block scalar is joined the same way", text, f"](Meta/Folded.md) - {wrapped}")
+    # The header is YAML syntax. Left in, it renders into the navigation
+    # document as literal punctuation in front of every folded description.
+    missing("and its '>-' header never reaches the page", text, ">- A description")
 
     # --- no churn -----------------------------------------------------------
     # The rendered timestamp changes on every render, so comparing whole files
