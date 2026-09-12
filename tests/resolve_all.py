@@ -19,7 +19,7 @@ def main() -> int:
 
     for path in sorted(vault.ROOT.rglob("*.md")):
         rel = path.relative_to(vault.ROOT)
-        if vault.is_index_excluded(rel) or not path.is_file():
+        if vault.is_search_excluded(rel) or not path.is_file():
             continue
         note = rel.as_posix()
         text = vault.read_text(path)

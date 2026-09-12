@@ -42,8 +42,8 @@ class Settings:
     allowed_hosts: tuple[str, ...]
     ollama_url: str
     embed_model: str
-    exclude_dirs: frozenset[str]
-    index_doc_exclude: tuple[str, ...]
+    search_exclude_dirs: frozenset[str]
+    index_exclude_dirs: tuple[str, ...]
     chunk_target_tokens: int
     chunk_overlap_tokens: int
     chunk_min_tokens: int
@@ -74,13 +74,22 @@ def load() -> Settings:
         allowed_hosts=_csv("MCP_ALLOWED_HOSTS", "vault-mcp:8080,127.0.0.1:8090"),
         ollama_url=ollama_url,
         embed_model=os.environ.get("EMBED_MODEL", "nomic-embed-text"),
-        exclude_dirs=frozenset(_csv("EXCLUDE_DIRS", "Workflows,Reports,.obsidian")),
-        # Kept apart from EXCLUDE_DIRS on purpose. That one drops Workflows/ and
-        # Reports/ wholesale from *search*; index.md must not, because curated
-        # notes live inside both. These are the generated series only, and the
-        # list mirrors the "Excluded folders" table in Meta/Conventions.md.
-        index_doc_exclude=_csv(
-            "INDEX_DOC_EXCLUDE",
+        # Bare folder *names*, matched against every part of a path, so
+        # "Workflows" drops the folder wherever it appears.
+        search_exclude_dirs=frozenset(
+            _csv("SEARCH_EXCLUDE_DIRS", "Workflows,Reports,.obsidian")
+        ),
+        # Root-relative path *prefixes* - "Approvals" alone matches nothing.
+        # The shapes differ because the questions do, so the two lists are not
+        # interchangeable despite the parallel names.
+        #
+        # Kept apart from SEARCH_EXCLUDE_DIRS on purpose. That one drops
+        # Workflows/ and Reports/ wholesale from *search*; index.md must not,
+        # because curated notes live inside both. These are the generated series
+        # only, and the list mirrors the "Excluded folders" table in
+        # Meta/Conventions.md.
+        index_exclude_dirs=_csv(
+            "INDEX_EXCLUDE_DIRS",
             "Workflows/Approvals,"
             "Workflows/Email Triage/Logs,"
             "Reports/Daily Coffee Read,"

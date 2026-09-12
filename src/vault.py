@@ -84,9 +84,9 @@ INDEX_DOC = "index.md"
 def is_protected(rel: Path) -> bool:
     """True if this path must never be written.
 
-    This is the *only* thing standing between Lyra and `rm -rf .git`, now that
-    EXCLUDE_DIRS has been narrowed to indexing. Reads are unrestricted; writes
-    go through here.
+    This is the *only* thing standing between Lyra and `rm -rf .git`, now
+    that SEARCH_EXCLUDE_DIRS has been narrowed to indexing. Reads are
+    unrestricted; writes go through here.
 
     index.md joins the hidden directories because it is now generated from the
     notes themselves. A write to it is not dangerous, it is futile - the next
@@ -144,7 +144,7 @@ def _out_of_scope(rel: Path) -> str | None:
     return None if target.startswith(prefix) else scope
 
 
-def is_index_excluded(rel: Path) -> bool:
+def is_search_excluded(rel: Path) -> bool:
     """True if this path is kept out of the vector index and BM25.
 
     Workflows/ and Reports/ are machine-generated series - noise in search, but
@@ -160,7 +160,7 @@ def is_index_excluded(rel: Path) -> bool:
     return (
         _is_hidden(rel)
         or rel.as_posix() == INDEX_DOC
-        or any(part in settings.exclude_dirs for part in rel.parts)
+        or any(part in settings.search_exclude_dirs for part in rel.parts)
     )
 
 
@@ -485,7 +485,7 @@ def walk_notes() -> list[Path]:
             rel = path.relative_to(ROOT)
         except ValueError:
             continue
-        if is_index_excluded(rel) or not path.is_file():
+        if is_search_excluded(rel) or not path.is_file():
             continue
         notes.append(path)
     return notes
@@ -565,7 +565,7 @@ def find_by_frontmatter(key: str, value: str, prefix: str | None = None) -> list
     of a number.
 
     Deliberately a filesystem walk and never the semantic index. Workflows/ is
-    in EXCLUDE_DIRS and therefore absent from search entirely, and every note
+    in SEARCH_EXCLUDE_DIRS and therefore absent from search entirely, and every note
     this exists to find lives there. `prefix` narrows it to one folder and is
     worth passing whenever the caller knows it - it is what turns reading the
     whole vault into reading one directory.

@@ -63,7 +63,7 @@ def report() -> int:
 # --------------------------------------------------------------------------
 # Fixture vault
 #
-# Workflows/Approvals is deliberate: it is in EXCLUDE_DIRS, so it is invisible
+# Workflows/Approvals is deliberate: it is in SEARCH_EXCLUDE_DIRS, so it is invisible
 # to search, and it is where every note the frontmatter query exists to find
 # actually lives. A query that quietly used the index would return nothing here
 # and pass every other assertion in this file.
@@ -360,7 +360,7 @@ def names(response: httpx.Response) -> list[str]:
 
 def test_frontmatter_query() -> None:
     write_fixture()
-    # Every note here is under Workflows/, which is in EXCLUDE_DIRS. A query
+    # Every note here is under Workflows/, which is in SEARCH_EXCLUDE_DIRS. A query
     # served from the semantic index would return an empty list.
     pending = call("GET", "/frontmatter?key=status&value=pending")
     check("pending proposals are found", pending.status_code, 200)

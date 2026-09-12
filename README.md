@@ -61,9 +61,9 @@ YAML would change what every comparison downstream sees. A `Target-Type: body` `
 replaces the prose and leaves the frontmatter block exactly as it was, for notes whose
 text is regenerated on a schedule but whose metadata is written once.
 
-`/frontmatter` walks the filesystem and never the semantic index — `Workflows/` is in
-`EXCLUDE_DIRS` and so is absent from search entirely, which is exactly where the notes
-it is asked about live.
+`/frontmatter` walks the filesystem and never the semantic index — `Workflows/` is
+in `SEARCH_EXCLUDE_DIRS` and so is absent from search entirely, which is exactly
+where the notes it is asked about live.
 
 Two deliberate differences from the plugin it replaces:
 
@@ -99,7 +99,7 @@ Two properties are deliberate:
   dangerous, and a tool that accepts one teaches the caller the edit worked. Fix a wrong
   line by fixing the note's `title` or `description`. It stays readable.
 
-Generated note series — the folders in `INDEX_DOC_EXCLUDE` — are not indexed note by
+Generated note series — the folders in `INDEX_EXCLUDE_DIRS` — are not indexed note by
 note; the approvals folder alone would swamp the document. Each gets one line in its
 parent section saying so, and only when the folder actually exists.
 
@@ -137,8 +137,8 @@ server refuses to start without it rather than treating an empty key as "auth of
 | `EMBED_MODEL` | `nomic-embed-text` | Embedding model |
 | `EMBED_DIMS` | `768` | Embedding dimensions |
 | `EMBED_BATCH_SIZE` | `64` | Embedding requests per batch |
-| `EXCLUDE_DIRS` | `Workflows,Reports,.obsidian` | Folders left out of the search index |
-| `INDEX_DOC_EXCLUDE` | the six generated series | Folders left out of `index.md` |
+| `SEARCH_EXCLUDE_DIRS` | `Workflows,Reports,.obsidian` | Folder *names*, left out of the search index |
+| `INDEX_EXCLUDE_DIRS` | the six generated series | Folder *paths*, left out of `index.md` |
 | `CHUNK_TARGET_TOKENS` | `400` | Target chunk size |
 | `CHUNK_OVERLAP_TOKENS` | `60` | Overlap between chunks |
 | `CHUNK_MIN_TOKENS` | `120` | Below this, a chunk merges into its neighbour |
@@ -146,11 +146,25 @@ server refuses to start without it rather than treating an empty key as "auth of
 | `WATCH_DEBOUNCE_SECONDS` | `2.0` | Filesystem-watch debounce before reindexing |
 | `BIND_HOST` / `BIND_PORT` | `0.0.0.0` / `8080` | Listen address |
 
-`EXCLUDE_DIRS` and `INDEX_DOC_EXCLUDE` answer different questions and must not be
-merged. The first drops `Workflows/` and `Reports/` from search wholesale; the second
-cannot, because curated notes live inside both — `Workflows/Email Triage/Rules.md` and
-the `Reports/PC/` reports are navigated even though they are not searched.
-`INDEX_DOC_EXCLUDE` mirrors the "Excluded folders" table in the vault's
+`SEARCH_EXCLUDE_DIRS` and `INDEX_EXCLUDE_DIRS` read as a pair, but they are not
+interchangeable and must not be merged — they differ in **what they ask** and in **what
+they accept**.
+
+The first drops `Workflows/` and `Reports/` from search wholesale; the second cannot,
+because curated notes live inside both — `Workflows/Email Triage/Rules.md` and the
+`Reports/PC/` reports are navigated even though they are not searched.
+
+They also take different value shapes, which the names do not show:
+
+| | Value | Matched |
+| --- | --- | --- |
+| `SEARCH_EXCLUDE_DIRS` | bare folder names — `Workflows` | against every part of a path, at any depth |
+| `INDEX_EXCLUDE_DIRS` | root-relative paths — `Workflows/Approvals` | as a prefix, from the vault root |
+
+So `Approvals` on its own excludes nothing from `index.md`, and `Workflows/Approvals`
+excludes nothing from search. Neither is an error; both silently do nothing.
+
+`INDEX_EXCLUDE_DIRS` mirrors the "Excluded folders" table in the vault's
 `Meta/Conventions.md`; that table, this variable, `.scripts/check_frontmatter.py` and
 the vault's `.gitignore` are four copies of one list and have to move together.
 

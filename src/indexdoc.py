@@ -61,15 +61,19 @@ class Entry:
 # --------------------------------------------------------------------------
 # Exclusions
 #
-# Distinct from is_index_excluded(), which governs *search*. That one drops
-# Workflows/ and Reports/ wholesale; this one must not, because the curated
-# notes inside them - Workflows/Email Triage/Rules.md, Reports/PC/ - belong in
-# the navigation document. Only the generated series come out.
+# INDEX_EXCLUDE_DIRS, read here; SEARCH_EXCLUDE_DIRS, read by
+# vault.is_search_excluded(). The names are parallel but the lists are not
+# interchangeable, in two ways. That one drops Workflows/ and Reports/
+# wholesale; this one must not, because the curated notes inside them -
+# Workflows/Email Triage/Rules.md, Reports/PC/ - belong in the navigation
+# document, so only the generated series come out. And that one matches bare
+# folder names against any part of a path, where these are root-relative
+# prefixes: "Approvals" alone would match nothing here.
 # --------------------------------------------------------------------------
 
 
 def _excluded_prefixes() -> tuple[str, ...]:
-    return tuple(prefix.lower().rstrip("/") + "/" for prefix in settings.index_doc_exclude)
+    return tuple(prefix.lower().rstrip("/") + "/" for prefix in settings.index_exclude_dirs)
 
 
 def is_generated_series(rel: str) -> bool:
@@ -209,7 +213,7 @@ def _live_exclusions() -> list[str]:
     describe the config rather than the vault.
     """
     live = []
-    for prefix in settings.index_doc_exclude:
+    for prefix in settings.index_exclude_dirs:
         clean = prefix.strip("/")
         if clean and (vault.ROOT / clean).is_dir():
             live.append(clean)

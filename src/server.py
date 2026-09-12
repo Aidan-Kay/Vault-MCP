@@ -160,7 +160,7 @@ async def _on_change(path: Path) -> None:
     except Exception:
         log.exception("index.md refresh failed for %s", vault.relpath(path))
 
-    if _ready and not vault.is_index_excluded(path.resolve().relative_to(vault.ROOT)):
+    if _ready and not vault.is_search_excluded(path.resolve().relative_to(vault.ROOT)):
         await _reindex(path)
 
 
@@ -168,7 +168,7 @@ async def _on_change(path: Path) -> None:
 async def lifespan(_server: MCPServer) -> AsyncIterator[None]:
     global _embedder, _build_started
 
-    log.info("vault=%s exclude=%s", vault.ROOT, sorted(settings.exclude_dirs))
+    log.info("vault=%s exclude=%s", vault.ROOT, sorted(settings.search_exclude_dirs))
     _embedder = Embedder()
     _build_started = time.monotonic()
 
@@ -607,7 +607,7 @@ async def frontmatter_endpoint(request: Request) -> JSONResponse | PlainTextResp
     list of {"filename": "<vault-relative path>"}, which is all any consumer
     read out of it.
 
-    Never touches the semantic index: Workflows/ is in EXCLUDE_DIRS and so is
+    Never touches the semantic index: Workflows/ is in SEARCH_EXCLUDE_DIRS and so is
     absent from search entirely, and that is exactly where the notes this finds
     live.
     """

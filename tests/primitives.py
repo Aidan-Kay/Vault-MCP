@@ -385,7 +385,7 @@ def test_path_safety() -> None:
     )
     check(
         "generated series stay out of the index",
-        vault.is_index_excluded(Path("Workflows/Daily Tasks/Task List.md")),
+        vault.is_search_excluded(Path("Workflows/Daily Tasks/Task List.md")),
         True,
     )
     check("but are not protected", vault.is_protected(Path("Workflows/x.md")), False)
