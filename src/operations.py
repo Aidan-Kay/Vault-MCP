@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import re
 import urllib.parse
-from pathlib import Path
 
 from . import edit
 from . import vault
@@ -113,7 +112,6 @@ def set_frontmatter(path: str, key: str, value=None, delete: bool = False) -> st
     return f"{'removed' if delete else 'set'} {key!r} in {rel}"
 
 
-
 def set_body(path: str, content: str) -> str:
     """Replace everything after the frontmatter, leaving the block untouched.
 
@@ -140,6 +138,7 @@ def set_body(path: str, content: str) -> str:
     updated, note = _timestamped(prefix + vault.normalise_body(content))
     vault.atomic_write(resolved, updated)
     return f"replaced the body of {rel}{note}"
+
 
 def delete(path: str) -> str:
     """Delete a note. There is no trash - the vault's git history is the undo."""
