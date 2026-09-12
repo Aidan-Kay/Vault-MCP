@@ -228,6 +228,19 @@ def frontmatter_span(text: str) -> int:
     return match.group(0).count("\n") if match else 0
 
 
+
+def without_frontmatter(text: str) -> str:
+    """The prose: everything after the YAML block, if the note opens with one.
+
+    Textual, not semantic - a block that does not parse is still a block and is
+    still removed. That is deliberate: metadata() answers {} for a malformed
+    block, so a caller reading only the parsed fields would otherwise find the
+    raw YAML pasted on the front of the note it asked for.
+    """
+    match = _FRONTMATTER_RE.match(text)
+    return text[match.end() :].lstrip("\r\n") if match else text
+
+
 def iter_headings(text: str) -> list[Heading]:
     """ATX headings, skipping frontmatter and fenced code blocks.
 
@@ -389,23 +402,33 @@ def parse_note(rel_path: str) -> dict:
 
 
 def note_json(rel_path: str, section: str | None = None) -> dict:
-    """A note as {path, content, frontmatter} - the structured read.
+    """A note as {path, content, body, frontmatter} - the structured read.
 
     The shape obsidian-local-rest-api returned for
     `Accept: application/vnd.olrapi.note+json`, minus `tags` and `stat`, which
     no caller reads. It exists so a consumer that wants one frontmatter field
     does not have to parse YAML out of a markdown string itself.
 
-    `section` narrows `content` exactly as read_note does; `frontmatter` is
-    always the whole note's, since a section does not have one of its own.
+    `content` is the file, byte for byte, and is the only field that is. The
+    parsed `frontmatter` cannot reconstruct the block it came from, and answers
+    {} outright when the YAML does not parse - four notes in this vault do not.
+    Stripping the block from `content` would hand those back with no trace of
+    their frontmatter in either field, so `body` carries the prose and
+    `content` keeps everything.
+
+    `section` narrows `content` exactly as read_note does; a section has no
+    frontmatter of its own, so `body` is then the same text. `frontmatter` is
+    always the whole note's.
     """
     path = safe_resolve(rel_path)
     if path.is_dir():
         raise VaultError(f"{relpath(path)!r} is a directory - use vault_list")
     text = read_text(path)
+    content = extract_section(text, section) if section else text
     return {
         "path": relpath(path),
-        "content": extract_section(text, section) if section else text,
+        "content": content,
+        "body": content if section else without_frontmatter(content),
         "frontmatter": metadata(text),
     }
 

@@ -189,16 +189,27 @@ def test_structured_read() -> None:
         check_in(f"{label} is answered as JSON", "application/json", got.headers["content-type"])
         body = got.json()
         check(f"{label}: path", body["path"], "Notes/Alpha.md")
-        check(f"{label}: content", body["content"], NOTE)
+        check(f"{label}: content is the file, byte for byte", body["content"], NOTE)
+        # `body` exists so a caller wanting the prose does not carry its own
+        # frontmatter regex. Three n8n nodes did, and one of them assembles
+        # Lyra's whole system prompt.
+        check(f"{label}: body drops the frontmatter", body["body"], NOTE.split("---\n", 2)[2].lstrip())
+        check(f"{label}: body keeps the prose whole", body["body"].splitlines()[0], "# Alpha")
         check(f"{label}: title", body["frontmatter"]["title"], "Alpha")
         check(f"{label}: tags", body["frontmatter"]["tags"], ["lyra", "ops"])
-        check(f"{label}: no stat or tags key invented", sorted(body), ["content", "frontmatter", "path"])
+        check(
+            f"{label}: no stat or tags key invented",
+            sorted(body),
+            ["body", "content", "frontmatter", "path"],
+        )
 
     scoped = call(
         "GET", "/vault/Notes/Alpha.md?section=Detail", headers={"Accept": JSON_ACCEPT}
     ).json()
     check("section= narrows content", scoped["content"].strip().splitlines()[0], "## Detail")
     check("section= leaves frontmatter whole", scoped["frontmatter"]["title"], "Alpha")
+    # A section carries no frontmatter of its own, so there is nothing to strip.
+    check("section= makes body the same text", scoped["body"], scoped["content"])
 
     # Malformed YAML must not make a note unreadable. `Get Triage Rules` wants
     # the content; a parse failure in a field it never mentions should not be
@@ -207,6 +218,20 @@ def test_structured_read() -> None:
     check("malformed YAML still returns 200", broken.status_code, 200)
     check("malformed YAML yields empty frontmatter", broken.json()["frontmatter"], {})
     check_in("malformed YAML still returns content", "does not parse", broken.json()["content"])
+    # The reason `content` is not the stripped field. metadata() answers {} for
+    # a block it cannot parse, so if `content` had the block removed too, this
+    # note would come back with no trace of its frontmatter anywhere - and four
+    # notes in the real vault parse exactly this badly.
+    check(
+        "malformed YAML is still removed from body",
+        "title: Broken" in broken.json()["body"],
+        False,
+    )
+    check_in(
+        "but the block itself survives in content",
+        "title: Broken",
+        broken.json()["content"],
+    )
 
 
 # --------------------------------------------------------------------------

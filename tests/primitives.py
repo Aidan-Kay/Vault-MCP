@@ -137,6 +137,34 @@ def test_no_quotes_added() -> None:
     check("scalar written unquoted", "title: Example" in out, True)
 
 
+
+def test_body_is_content_without_frontmatter() -> None:
+    """`body` is textual, so it removes a block whether or not it parses.
+
+    Nothing is lost by that, because `content` is untouched - which is the
+    trade the structured read is built on.
+    """
+    note = "---\ntitle: Alpha\n---\n\n# Alpha\n\nProse.\n"
+    check("frontmatter removed", vault.without_frontmatter(note), "# Alpha\n\nProse.\n")
+
+    # No block at all: the note is already its own body.
+    check("no frontmatter is a no-op", vault.without_frontmatter("# Alpha\n"), "# Alpha\n")
+
+    # A leading `---` is a fence everywhere in this server - frontmatter_span,
+    # iter_headings and metadata all read it that way - so body agrees with them
+    # rather than inventing a third rule for what opens a note.
+    check(
+        "a leading fence is frontmatter here, whatever it was meant to be",
+        vault.without_frontmatter("---\n\nintro\n\n---\n\n# Alpha\n"),
+        "# Alpha\n",
+    )
+
+    # An unparseable block is still a block. metadata() gives up on this one.
+    broken = "---\ntitle: Alpha: beta\n---\n\n# Alpha\n"
+    check("malformed block still removed", vault.without_frontmatter(broken), "# Alpha\n")
+    check("and metadata gives up on it", vault.metadata(broken), {})
+
+
 def test_a_string_stays_a_string() -> None:
     """A value must read back as the value it was set to.
 
