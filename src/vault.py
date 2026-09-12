@@ -12,6 +12,7 @@ import contextlib
 import os
 import re
 import tempfile
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -52,6 +53,53 @@ def is_protected(rel: Path) -> bool:
     go through here.
     """
     return _is_hidden(rel)
+
+
+# The write scope for the request being served, or None for "anywhere".
+#
+# A ContextVar rather than a module global because the server is ASGI and
+# concurrent: two requests can be in flight, and a global would leak one
+# caller's scope into another's writes. Set per request and never inherited -
+# an unscoped request sees None however many scoped ones came before it.
+_WRITE_SCOPE: ContextVar[str | None] = ContextVar("vault_write_scope", default=None)
+
+
+@contextlib.contextmanager
+def write_scope(scope: str | None):
+    """Confine writes to one note, or to one directory, for this request.
+
+    `scope` is a vault-relative path. A `.md` path allows exactly that note; any
+    other path is treated as a directory prefix. None restores the unscoped
+    default, which is what every caller that does not ask for this gets.
+    """
+    token = _WRITE_SCOPE.set(scope.strip().lstrip("/") if scope else None)
+    try:
+        yield
+    finally:
+        _WRITE_SCOPE.reset(token)
+
+
+def current_write_scope() -> str | None:
+    """The scope in force, for callers that must refuse work rather than narrow it."""
+    return _WRITE_SCOPE.get()
+
+
+def _out_of_scope(rel: Path) -> str | None:
+    """The scope this path violates, or None if it is allowed.
+
+    Reads are never scoped. The agent revising a proposal still has to read the
+    conventions, the note it is revising, and whatever that note refers to; it
+    is writing outside its remit that has to be impossible, not knowing things.
+    """
+    scope = _WRITE_SCOPE.get()
+    if scope is None:
+        return None
+
+    target = rel.as_posix()
+    if scope.lower().endswith(".md"):
+        return None if target == scope else scope
+    prefix = scope.rstrip("/") + "/"
+    return None if target.startswith(prefix) else scope
 
 
 def is_index_excluded(rel: Path) -> bool:
@@ -121,6 +169,17 @@ def safe_resolve(rel_path: str, *, must_exist: bool = True, writing: bool = Fals
             raise VaultError(f"path is protected and cannot be written: {rel.as_posix()!r}")
         if candidate.suffix.lower() != ".md":
             raise VaultError(f"only .md files may be written, got: {rel.as_posix()!r}")
+        scope = _out_of_scope(rel)
+        if scope is not None:
+            # Deliberately not phrased as something to retry. A caller that
+            # reaches this has been handed a narrower remit than it thinks it
+            # has, and the useful thing is for it to say so rather than to go
+            # looking for a path that gets through.
+            raise VaultError(
+                f"this request may only write to {scope!r}, so "
+                f"{rel.as_posix()!r} was refused. Nothing was changed. Report this "
+                "rather than trying another path."
+            )
 
     if must_exist and not candidate.exists():
         raise VaultError(f"no such path in the vault: {rel.as_posix()!r}")

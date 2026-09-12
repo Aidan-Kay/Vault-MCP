@@ -170,6 +170,19 @@ def _rewrite_links(source_rel: str, dest_rel: str) -> int:
 
 def move(source: str, destination: str, update_links: bool = True) -> str:
     """Move or rename a note, optionally repointing every link to it."""
+    # Refused outright under a write scope rather than narrowed to fit one.
+    # _rewrite_links() writes through vault.atomic_write directly, over every
+    # note in the vault, without going near safe_resolve - so the one guard that
+    # would contain this does not see it. Allowing a "scoped" move would mean a
+    # confined caller could still rewrite the whole vault, which is worse than
+    # not offering the tool.
+    scope = vault.current_write_scope()
+    if scope is not None:
+        raise VaultError(
+            f"this request may only write to {scope!r}, and moving a note touches "
+            "every note that links to it, so it cannot be scoped. Nothing was changed."
+        )
+
     src = vault.safe_resolve(source, writing=True)
     dest = vault.safe_resolve(destination, must_exist=False, writing=True)
 

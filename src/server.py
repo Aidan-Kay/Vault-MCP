@@ -14,6 +14,7 @@ import hmac
 import json
 import logging
 import time
+import urllib.parse
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -439,6 +440,57 @@ class VaultRoutes:
         return await self.mcp_app(scope, receive, send)
 
 
+WRITE_SCOPE_PREFIX = "/mcp/only/"
+
+
+class ScopedWrites:
+    """Confine one request's writes, from the path it arrived on.
+
+        /mcp                                   writes anywhere (unchanged)
+        /mcp/only/Workflows/Approvals/x.md     writes only to that note
+        /mcp/only/Workflows/Approvals          writes only under that folder
+
+    **Why the URL and not a header.** The scope has to be chosen per call by the
+    caller, and n8n's MCP Client node takes its auth header from a static
+    credential while its endpoint URL is an ordinary expression field. Putting
+    it in the path is what lets one agent, with one tool list, be handed a
+    different remit per invocation - no second copy of the workflow, no second
+    set of tools to keep in step.
+
+    Safe because the transport is stateless_http: every MCP call is its own HTTP
+    request, so a scope can never outlive the call it came with. The ContextVar
+    behind vault.write_scope() is what keeps concurrent requests from seeing
+    each other's.
+
+    Reads are untouched. An agent confined to one note still has to read the
+    conventions and whatever the note refers to; it is writing outside its remit
+    that must be impossible.
+    """
+
+    def __init__(self, inner) -> None:
+        self.inner = inner
+
+    async def __call__(self, scope, receive, send) -> None:
+        path = scope.get("path", "") if scope["type"] == "http" else ""
+        if not path.startswith(WRITE_SCOPE_PREFIX):
+            return await self.inner(scope, receive, send)
+
+        confined = urllib.parse.unquote(path[len(WRITE_SCOPE_PREFIX):]).strip("/")
+        if not confined:
+            return await self.inner(scope, receive, send)
+
+        # Rewritten to the path the MCP app is actually mounted on, so the
+        # transport never learns this happened. raw_path goes too, or Starlette
+        # re-derives the original from it and routes to nothing.
+        scope = dict(scope)
+        scope["path"] = "/mcp"
+        scope.pop("raw_path", None)
+
+        log.info("write scope for this request: %s", confined)
+        with vault.write_scope(confined):
+            await self.inner(scope, receive, send)
+
+
 app = mcp.streamable_http_app(
     streamable_http_path="/mcp",
     stateless_http=True,
@@ -449,6 +501,7 @@ app = mcp.streamable_http_app(
 )
 
 app = VaultRoutes(app, rest_app)
+app = ScopedWrites(app)
 
 
 class BearerAuth:

@@ -44,6 +44,24 @@ Both surfaces call `src/operations.py`, so the resolver and the vault convention
 applied once regardless of how the caller arrived. Every write bumps the note's
 `timestamp`, or reports why it could not.
 
+**Scoped writes** at `/mcp/only/<path>` — the same MCP surface with this request's
+writes confined to one note (`/mcp/only/Workflows/Approvals/x.md`) or one folder
+(`/mcp/only/Workflows/Approvals`). Reads are never scoped: an agent confined to one
+note still has to read the conventions and whatever that note refers to. `vault_move`
+is refused outright while a scope is set, because rewriting inbound links touches every
+note that points at the source.
+
+It rides on the URL rather than a header because that is the part a caller can vary per
+call — n8n's MCP Client node takes its auth from a static credential but its endpoint
+from an expression — so one agent with one tool list can be handed a different remit per
+invocation, with no second copy of the workflow to keep in step. The scope cannot
+outlive its request: the transport is stateless, and a `ContextVar` keeps concurrent
+requests from seeing each other's.
+
+This exists because an agent told in prose to "carry nothing out" replaced a section of
+the vault's root `index.md` while revising an unrelated note. A sentence in a prompt is
+not a guard.
+
 ## Configuration
 
 All configuration is environment variables. `VAULT_MCP_API_KEY` is required — the
