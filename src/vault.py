@@ -332,7 +332,10 @@ def extract_section(text: str, section: str) -> str:
 def read_note(rel_path: str, section: str | None = None) -> str:
     path = safe_resolve(rel_path)
     if path.is_dir():
-        raise VaultError(f"{relpath(path)!r} is a directory - use vault_list")
+        raise VaultError(
+            f"{relpath(path)!r} is a directory, not a note - list it rather "
+            "than reading it"
+        )
     text = read_text(path)
     return extract_section(text, section) if section else text
 
@@ -446,7 +449,10 @@ def note_json(rel_path: str, section: str | None = None) -> dict:
     """
     path = safe_resolve(rel_path)
     if path.is_dir():
-        raise VaultError(f"{relpath(path)!r} is a directory - use vault_list")
+        raise VaultError(
+            f"{relpath(path)!r} is a directory, not a note - list it rather "
+            "than reading it"
+        )
     text = read_text(path)
     content = extract_section(text, section) if section else text
     return {
@@ -729,8 +735,9 @@ def _scalar(value) -> str:
     """
     if value is None:
         # set_frontmatter refuses a bare None before it reaches here, with a
-        # message naming delete=. This catches a None *inside* a list, where
-        # `- None` would come back as the string "None" with nothing to see.
+        # message naming both spellings of delete. This catches a None *inside*
+        # a list, where `- None` would come back as the string "None" with
+        # nothing to see.
         raise VaultError(
             "a frontmatter value cannot be null. Pass the value to set, or "
             "delete the field."
@@ -807,9 +814,10 @@ def set_frontmatter(text: str, key: str, value=None, *, delete: bool = False) ->
     """
     if not delete and value is None:
         raise VaultError(
-            f"no value given for {key!r}. Pass the value to set, or delete=true "
-            "to remove the field - a null is not a value this vault's "
-            "frontmatter carries."
+            f"no value given for {key!r}. Pass the value to set, or delete the "
+            "field instead - delete=true as a tool argument, Operation: delete "
+            "as a header - a null is not a value this vault's frontmatter "
+            "carries."
         )
 
     lines = normalise_body(text).split("\n")

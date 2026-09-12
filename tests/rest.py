@@ -10,6 +10,9 @@ that deliberately differs from the plugin.
     frontmatter PATCH     Target-Type: frontmatter, the claim in claim-before-act
     /frontmatter          find notes by an exact field value, without the index
 
+Removing a frontmatter field came later, and for a different reason: the refusal
+a null value earns names `delete`, and REST had no spelling of it.
+
 The claim is the correctness-critical one. `status: "approved"` written with its
 quotes intact compares equal to nothing downstream, and a status that never
 matches is a proposal that can never be resolved - so the assertions here are on
@@ -283,6 +286,41 @@ def test_frontmatter_patch() -> None:
     check("and reads back as that exact string", fm["thread_id"], "1548070648281038848")
     check("status still compares equal downstream", fm["status"], "approved")
     check("rev is still a number, not a string", fm["rev"], 2)
+
+    # Removal is an operation, not a null value. A null is refused outright, and
+    # the refusal tells the caller to delete the field - which, until this,
+    # named a spelling no REST caller had.
+    removed = call(
+        "PATCH",
+        "/vault/Workflows/Approvals/a1.md",
+        headers={"Target": "rev", "Target-Type": "frontmatter", "Operation": "delete"},
+    )
+    check("deleting a field returns 200", removed.status_code, 200)
+    after = read_note("Workflows/Approvals/a1.md")
+    check("the field is gone", "\nrev:" in after, False)
+    check_in("the rest of the block is untouched", "\nstatus: approved\n", after)
+    check("and the note was timestamped", "2026-09-12T09:00:00Z" in after, False)
+
+    # Deleting a key that is not there is not an error: the caller asked for the
+    # field to be absent, and afterwards it is.
+    again = call(
+        "PATCH",
+        "/vault/Workflows/Approvals/a1.md",
+        headers={"Target": "rev", "Target-Type": "frontmatter", "Operation": "delete"},
+    )
+    check("deleting an absent field is not an error", again.status_code, 200)
+
+    nulled = call(
+        "PATCH",
+        "/vault/Workflows/Approvals/a3.md",
+        headers={"Target": "status", "Target-Type": "frontmatter"},
+        content="null",
+    )
+    check("a null value is still refused", nulled.status_code, 400)
+    check_in("and names a spelling REST has", "Operation: delete", nulled.text)
+    check_in(
+        "status is untouched", "\nstatus: pending\n", read_note("Workflows/Approvals/a3.md")
+    )
 
     # A bare word is not JSON. Rejecting it is what stops `approved` and
     # `"approved"` quietly becoming different values in the same field.

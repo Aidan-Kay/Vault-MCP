@@ -385,6 +385,25 @@ def vault_write(path: str, content: str, overwrite: bool = False) -> str:
 
 
 @mcp.tool()
+def vault_set_body(path: str, content: str) -> str:
+    """Replace a note's prose, leaving its frontmatter exactly as it is.
+
+    For a note whose text is rewritten wholesale but whose metadata is written
+    once - a summary regenerated on a schedule. vault_write is the wrong tool
+    for that: it replaces the file, so the block goes with it and the note stops
+    being able to describe itself.
+
+    Args:
+        path: Vault-relative path.
+        content: The complete new body, without frontmatter. The existing block
+            is carried across as the bytes it already had, so a block this
+            server could not parse survives too. A note that has no frontmatter
+            has no prefix to keep, and this is then the same as vault_write.
+    """
+    return _do(operations.set_body, path, content)
+
+
+@mcp.tool()
 def vault_set_frontmatter(path: str, key: str, value: str | list | None = None, delete: bool = False) -> str:
     """Set or remove one frontmatter field, leaving the rest of the block alone.
 
@@ -508,21 +527,31 @@ def _structured_read(request: Request, path: str) -> JSONResponse | PlainTextRes
 
 
 def _patch_frontmatter(path: str, key: str, operation: str, body: str) -> PlainTextResponse:
-    """PATCH with `Target-Type: frontmatter` - set one key from a JSON body.
+    """PATCH with `Target-Type: frontmatter` - set or remove one key.
 
     The body is JSON-*decoded*, not taken as written: `rev` arrives as the
     number 2 and a status as the quoted string "approved". Writing those quotes
     into the YAML would change what every status comparison downstream sees,
     which is the kind of break that surfaces three workflows away from its
     cause.
+
+    Removal is `Operation: delete`, with no body, rather than a `null` value.
+    A null is refused - there is no text that reads back as one - and the
+    refusal tells the caller to delete the field instead, which until now was
+    something only an MCP caller could do.
     """
+    if operation == "delete":
+        # No body to decode: a delete names the key and nothing else.
+        return PlainTextResponse(operations.set_frontmatter(path, key, delete=True))
+
     if operation != "replace":
         # set_frontmatter replaces the key outright. Accepting "append" here
         # would quietly discard the rest of a list rather than add to it, and a
         # refusal is the only honest answer until there is a caller to build for.
         raise vault.VaultError(
             f"Operation {operation!r} is not supported on frontmatter; only "
-            "'replace' is. Read the key and replace it with the value you want."
+            "'replace' and 'delete' are. Read the key and replace it with the "
+            "value you want."
         )
     try:
         value = json.loads(body)
